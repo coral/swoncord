@@ -5,10 +5,10 @@ use crate::swinsian::{State, TrackInfo};
 use cocoa::{
     appkit::{
         NSApp, NSApplication, NSApplicationActivateIgnoringOtherApps, NSImage, NSMenu, NSMenuItem,
-        NSRunningApplication, NSStatusBar, NSStatusItem, NSWindow,
+        NSRunningApplication, NSStatusBar, NSStatusItem, NSWindow
     },
     base::{YES, id, nil},
-    foundation::{NSAutoreleasePool, NSString},
+    foundation::{NSAutoreleasePool, NSString, NSSize, NSBundle},
 };
 use block::ConcreteBlock;
 use objc::{class, msg_send, sel, sel_impl};
@@ -36,7 +36,7 @@ impl Wrapper {
         Ok(t)
     }
 
-    pub fn configure(&mut self) -> Result<(), Error> {
+    pub fn configure(&mut self){
         unsafe {
         self.add_quit_item("Quit");
 
@@ -83,7 +83,6 @@ impl Wrapper {
                     usingBlock:&*block];
 
 
-        Ok(())
     }
     }
 
@@ -106,11 +105,27 @@ impl Wrapper {
         unsafe {
             let app = NSApp();
             app.activateIgnoringOtherApps_(YES);
+            
+            // Set activation policy to hide from dock
+            let _: () = msg_send![app, setActivationPolicy: 1]; // 1 = NSApplicationActivationPolicyAccessory
 
             let item = NSStatusBar::systemStatusBar(nil).statusItemWithLength_(-1.0);
-            let title = NSString::alloc(nil).init_str("kek");
            
-            item.setTitle_(title);
+            // Load and set the icon
+            let bundle: id = NSBundle::mainBundle();
+            let icon_path = NSString::alloc(nil).init_str("icon.icns");
+            let resource_path: id = msg_send![bundle, pathForResource:icon_path ofType:nil];
+   
+            let icon = NSImage::alloc(nil).initWithContentsOfFile_(resource_path);
+            
+            if icon != nil {
+                let _: () = msg_send![icon, setSize: NSSize::new(18.0, 18.0)];
+                let _: () = msg_send![item, setImage:icon];
+            } else {
+                let title = NSString::alloc(nil).init_str("Swoncord Dev");
+                item.setTitle_(title);
+            }
+            
             
             item.setMenu_(self.menu);
 
@@ -120,6 +135,8 @@ impl Wrapper {
             app.run();
         }
     }
+
+    
 }
 
 impl Drop for Wrapper {

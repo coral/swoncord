@@ -16,8 +16,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _dc = discord::Discord::new(r)?;
 
-    let mut application = app::Wrapper::new(s).unwrap();
-    application.configure().unwrap();
+    let mut application = app::Wrapper::new(s)?;
+    application.configure();
     application.run();
     Ok(())
 }

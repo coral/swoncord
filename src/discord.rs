@@ -102,7 +102,8 @@ impl Discord {
             .take(128)
             .collect();
         let details: String = t.title.chars().take(128).collect();
-        //let large_text: String = format!("Listening to {} with Swinsian", data.format);
+
+        let large_text: String = format!("Format: {}", t.file_type.clone().unwrap_or_default());
 
         let uri = match cover {
             Some(v) => v,
@@ -110,7 +111,7 @@ impl Discord {
         };
 
         let assets = activity::Assets::new()
-            //.large_text(large_text.as_str())
+            .large_text(large_text.as_str())
             .large_image(&uri)
             .small_text("Listening");
 
@@ -183,18 +184,8 @@ impl AlbumArtRequester {
 }
 impl AlbumArtRequester {
     pub fn get_album_art(&self, t: &TrackInfo) -> Result<String, Error> {
-        let query = ReleaseGroupSearchQuery::query_builder()
-            .artist(&t.artist)
-            .and()
-            .release_group(&t.album)
-            .build();
+        let release_id = self.find_release(t)?;
 
-        let releases = ReleaseGroup::search(query).execute_with_client(&self.client)?;
-
-        if releases.entities.is_empty() {
-            return Err(Error::NoData);
-        }
-        let release_id = &releases.entities[0].id;
         let cover_art_url = format!(
             "https://coverartarchive.org/release-group/{}/front-250",
             release_id
@@ -210,5 +201,32 @@ impl AlbumArtRequester {
         } else {
             Err(Error::NoData)
         }
+    }
+
+    fn find_release(&self, t: &TrackInfo) -> Result<String, Error> {
+        let query = ReleaseGroupSearchQuery::query_builder()
+            .artist(&t.artist)
+            .and()
+            .release_group(&t.album)
+            .build();
+
+        let releases = ReleaseGroup::search(query).execute_with_client(&self.client)?;
+
+        if !releases.entities.is_empty() {
+            return Ok(releases.entities[0].id.clone());
+        }
+
+        let query = ReleaseGroupSearchQuery::query_builder()
+            .and()
+            .release_group(&t.album)
+            .build();
+
+        let releases = ReleaseGroup::search(query).execute_with_client(&self.client)?;
+
+        if !releases.entities.is_empty() {
+            return Ok(releases.entities[0].id.clone());
+        }
+
+        Err(Error::NoData)
     }
 }

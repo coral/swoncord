@@ -21,7 +21,7 @@ pub struct TrackInfo {
     // pub art_path: Option<String>,
     // pub thumbnail_path: Option<String>,
     // pub file_path: String,
-    // pub file_type: Option<String>,
+    pub file_type: Option<String>,
     // pub bitrate: Option<String>,
     // pub grouping: Option<String>,
     // pub conductor: Option<String>,
@@ -113,7 +113,27 @@ fn get<T: FromObjcObject>(user_info: id, key: &str) -> Option<T> {
     }
 }
 
+#[allow(dead_code)]
+fn print_all_keys(user_info: id) {
+    unsafe {
+        let keys: id = msg_send![user_info, allKeys];
+        let count: usize = msg_send![keys, count];
+
+        for i in 0..count {
+            let key: id = msg_send![keys, objectAtIndex:i];
+            let _value: id = msg_send![user_info, objectForKey:key];
+
+            let key_str = NSString::UTF8String(key);
+            let key_rust = std::ffi::CStr::from_ptr(key_str).to_string_lossy();
+
+            println!("Key: {}", key_rust);
+        }
+    }
+}
+
 fn extract_track_info(user_info: id) -> TrackInfo {
+    //print_all_keys(user_info);
+
     TrackInfo {
         artist: get(user_info, "artist").unwrap_or_default(),
         album: get(user_info, "album").unwrap_or_default(),
@@ -129,7 +149,7 @@ fn extract_track_info(user_info: id) -> TrackInfo {
         // art_path: get(user_info, "artPath"),
         // thumbnail_path: get(user_info, "thumbnailPath"),
         // file_path: get(user_info, "filePath").unwrap_or_default(),
-        // file_type: get(user_info, "fileType"),
+        file_type: get(user_info, "fileType"),
         // bitrate: get(user_info, "bitrate"),
         // grouping: get(user_info, "grouping"),
         // conductor: get(user_info, "conductor"),

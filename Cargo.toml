@@ -14,3 +14,13 @@ pretty_env_logger = "0.5.0"
 thiserror = "2.0.12"
 musicbrainz_rs = {version = "0.9.1", default-features = false, features = ["blocking"] }
 reqwest = { version = "0.12.15", features = ["blocking"] }
+
+[package.metadata.bundle]
+name = "Swoncord"
+identifier = "com.oblique.media.swoncord"
+icon = ["assets/icon.icns"]
+category = "public.app-category.utilities"
+short_description = "Rich presence for Swinsian"
+long_description = """
+Simple menu bar app that shows the currently playing song in Discord for Swinsian.
+"""
