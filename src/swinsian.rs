@@ -5,7 +5,7 @@ use cocoa::foundation::NSString;
 use objc::{msg_send, sel, sel_impl};
 
 #[allow(dead_code)]
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Hash, PartialEq, Clone)]
 pub struct TrackInfo {
     pub artist: String,
     pub album: String,
@@ -15,8 +15,8 @@ pub struct TrackInfo {
     pub track_number: Option<u32>,
     pub disc_number: Option<u32>,
     pub year: Option<String>,
-    pub length: f64,
-    pub current_time: f64,
+    //pub length: f64,
+    // pub current_time: f64,
     pub track_uuid: String,
     pub art_path: Option<String>,
     pub thumbnail_path: Option<String>,
@@ -34,7 +34,7 @@ impl From<id> for TrackInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum State {
     Playing,
     Stopped,
@@ -52,14 +52,14 @@ impl From<&str> for State {
         }
     }
 }
-// Trait for extracting values from Objective-C objects
+
+// look there's prob a better way to do this but cba
 trait FromObjcObject {
     unsafe fn from_objc(obj: id) -> Option<Self>
     where
         Self: Sized;
 }
 
-// Implement for String
 impl FromObjcObject for String {
     unsafe fn from_objc(obj: id) -> Option<Self> {
         unsafe {
@@ -77,7 +77,6 @@ impl FromObjcObject for String {
     }
 }
 
-// Implement for u32
 impl FromObjcObject for u32 {
     unsafe fn from_objc(obj: id) -> Option<Self> {
         if obj != nil {
@@ -88,7 +87,6 @@ impl FromObjcObject for u32 {
     }
 }
 
-// Implement for f64
 impl FromObjcObject for f64 {
     unsafe fn from_objc(obj: id) -> Option<Self> {
         if obj != nil {
@@ -99,7 +97,6 @@ impl FromObjcObject for f64 {
     }
 }
 
-// Generic function to get values from dictionary
 fn get<T: FromObjcObject>(user_info: id, key: &str) -> Option<T> {
     unsafe {
         let ns_key = NSString::alloc(nil).init_str(key);
@@ -118,8 +115,8 @@ fn extract_track_info(user_info: id) -> TrackInfo {
         track_number: get(user_info, "trackNumber"),
         disc_number: get(user_info, "discNumber"),
         year: get(user_info, "year"),
-        length: get(user_info, "length").unwrap_or(0.0),
-        current_time: get(user_info, "currentTime").unwrap_or(0.0),
+        // length: get(user_info, "length").unwrap_or(0.0),
+        //current_time: get(user_info, "currentTime").unwrap_or(0.0),
         track_uuid: get(user_info, "track_uuid").unwrap_or_default(),
         art_path: get(user_info, "artPath"),
         thumbnail_path: get(user_info, "thumbnailPath"),
