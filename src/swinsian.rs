@@ -10,22 +10,22 @@ pub struct TrackInfo {
     pub artist: String,
     pub album: String,
     pub title: String,
-    pub genre: Option<String>,
-    pub composer: Option<String>,
-    pub track_number: Option<u32>,
-    pub disc_number: Option<u32>,
-    pub year: Option<String>,
-    //pub length: f64,
-    // pub current_time: f64,
-    pub track_uuid: String,
-    pub art_path: Option<String>,
-    pub thumbnail_path: Option<String>,
-    pub file_path: String,
-    pub file_type: Option<String>,
-    pub bitrate: Option<String>,
-    pub grouping: Option<String>,
-    pub conductor: Option<String>,
-    pub comment: Option<String>,
+    // pub genre: Option<String>,
+    // pub composer: Option<String>,
+    // pub track_number: Option<u32>,
+    // pub disc_number: Option<u32>,
+    // pub year: Option<String>,
+    // //pub length: f64,
+    // // pub current_time: f64,
+    // pub track_uuid: String,
+    // pub art_path: Option<String>,
+    // pub thumbnail_path: Option<String>,
+    // pub file_path: String,
+    // pub file_type: Option<String>,
+    // pub bitrate: Option<String>,
+    // pub grouping: Option<String>,
+    // pub conductor: Option<String>,
+    // pub comment: Option<String>,
 }
 
 impl From<id> for TrackInfo {
@@ -80,7 +80,9 @@ impl FromObjcObject for String {
 impl FromObjcObject for u32 {
     unsafe fn from_objc(obj: id) -> Option<Self> {
         if obj != nil {
-            Some(msg_send![obj, unsignedIntValue])
+            // Try to get the value safely
+            let result: u32 = msg_send![obj, unsignedIntValue];
+            Some(result)
         } else {
             None
         }
@@ -90,7 +92,9 @@ impl FromObjcObject for u32 {
 impl FromObjcObject for f64 {
     unsafe fn from_objc(obj: id) -> Option<Self> {
         if obj != nil {
-            Some(msg_send![obj, doubleValue])
+            // Try to get the value safely
+            let result: f64 = msg_send![obj, doubleValue];
+            Some(result)
         } else {
             None
         }
@@ -101,7 +105,11 @@ fn get<T: FromObjcObject>(user_info: id, key: &str) -> Option<T> {
     unsafe {
         let ns_key = NSString::alloc(nil).init_str(key);
         let value: id = msg_send![user_info, objectForKey:ns_key];
-        T::from_objc(value)
+        if value == nil {
+            return None;
+        }
+        let res = T::from_objc(value);
+        res
     }
 }
 
@@ -110,21 +118,21 @@ fn extract_track_info(user_info: id) -> TrackInfo {
         artist: get(user_info, "artist").unwrap_or_default(),
         album: get(user_info, "album").unwrap_or_default(),
         title: get(user_info, "title").unwrap_or_default(),
-        genre: get(user_info, "genre"),
-        composer: get(user_info, "composer"),
-        track_number: get(user_info, "trackNumber"),
-        disc_number: get(user_info, "discNumber"),
-        year: get(user_info, "year"),
-        // length: get(user_info, "length").unwrap_or(0.0),
-        //current_time: get(user_info, "currentTime").unwrap_or(0.0),
-        track_uuid: get(user_info, "track_uuid").unwrap_or_default(),
-        art_path: get(user_info, "artPath"),
-        thumbnail_path: get(user_info, "thumbnailPath"),
-        file_path: get(user_info, "filePath").unwrap_or_default(),
-        file_type: get(user_info, "fileType"),
-        bitrate: get(user_info, "bitrate"),
-        grouping: get(user_info, "grouping"),
-        conductor: get(user_info, "conductor"),
-        comment: get(user_info, "comment"),
+        // genre: get(user_info, "genre"),
+        // composer: get(user_info, "composer"),
+        // track_number: get(user_info, "trackNumber"),
+        // disc_number: get(user_info, "discNumber"),
+        // year: get(user_info, "year"),
+        // // length: get(user_info, "length").unwrap_or(0.0),
+        // //current_time: get(user_info, "currentTime").unwrap_or(0.0),
+        // track_uuid: get(user_info, "track_uuid").unwrap_or_default(),
+        // art_path: get(user_info, "artPath"),
+        // thumbnail_path: get(user_info, "thumbnailPath"),
+        // file_path: get(user_info, "filePath").unwrap_or_default(),
+        // file_type: get(user_info, "fileType"),
+        // bitrate: get(user_info, "bitrate"),
+        // grouping: get(user_info, "grouping"),
+        // conductor: get(user_info, "conductor"),
+        // comment: get(user_info, "comment"),
     }
 }
