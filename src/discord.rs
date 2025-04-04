@@ -97,13 +97,10 @@ impl Discord {
     }
 
     pub fn update(&mut self, t: &TrackInfo, cover: Option<String>) -> Result<(), Error> {
-        let state: String = format!("{} - {}", t.artist, t.album)
-            .chars()
-            .take(128)
-            .collect();
+        let state: String = format!("{} ", t.artist).chars().take(128).collect();
         let details: String = t.title.chars().take(128).collect();
 
-        let large_text: String = format!("Format: {}", t.file_type.clone().unwrap_or_default());
+        let large_text: String = t.album.chars().take(128).collect();
 
         let uri = match cover {
             Some(v) => v,
