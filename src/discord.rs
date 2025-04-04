@@ -3,6 +3,7 @@ use crate::swinsian::{State, TrackInfo};
 use crossbeam::channel::Receiver;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use log::error;
+use regex::Regex;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 enum PresenceState {
@@ -166,6 +167,8 @@ use reqwest::blocking::Client as HTTPClient;
 pub struct AlbumArtRequester {
     client: MusicBrainzClient,
     hc: HTTPClient,
+
+    filter: Regex,
 }
 
 impl AlbumArtRequester {
@@ -173,9 +176,14 @@ impl AlbumArtRequester {
         let mut mbc = MusicBrainzClient::default();
         mbc.set_user_agent("SwinsianRichPresence/1.0.0 ( https://jonasbengtson.se )")
             .unwrap();
+
+        let filter =
+            Regex::new(r"\s+[\(\[][^\(\)\[\]]*[\)\]](\s+[\(\[][^\(\)\[\]]*[\)\]])*$").unwrap();
+
         Self {
             client: mbc,
             hc: HTTPClient::new(),
+            filter,
         }
     }
 }
@@ -201,6 +209,7 @@ impl AlbumArtRequester {
     }
 
     fn find_release(&self, t: &TrackInfo) -> Result<String, Error> {
+        // Try the scoped down search first
         let query = ReleaseGroupSearchQuery::query_builder()
             .artist(&t.artist)
             .and()
@@ -213,6 +222,7 @@ impl AlbumArtRequester {
             return Ok(releases.entities[0].id.clone());
         }
 
+        // Lets go more broad and only search album name
         let query = ReleaseGroupSearchQuery::query_builder()
             .and()
             .release_group(&t.album)
@@ -224,6 +234,24 @@ impl AlbumArtRequester {
             return Ok(releases.entities[0].id.clone());
         }
 
+        // Lets strip the album name of any extra text
+        let cleaned_album = self.clean_album_name(&t.album);
+
+        let query = ReleaseGroupSearchQuery::query_builder()
+            .and()
+            .release_group(&cleaned_album)
+            .build();
+
+        let releases = ReleaseGroup::search(query).execute_with_client(&self.client)?;
+
+        if !releases.entities.is_empty() {
+            return Ok(releases.entities[0].id.clone());
+        }
+
         Err(Error::NoData)
+    }
+
+    fn clean_album_name(&self, album: &str) -> String {
+        self.filter.replace(album, "").to_string()
     }
 }

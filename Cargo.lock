@@ -1352,6 +1352,7 @@ dependencies = [
  "musicbrainz_rs",
  "objc",
  "pretty_env_logger",
+ "regex",
  "reqwest",
  "thiserror",
 ]

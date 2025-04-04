@@ -14,6 +14,7 @@ pretty_env_logger = "0.5.0"
 thiserror = "2.0.12"
 musicbrainz_rs = {version = "0.9.1", default-features = false, features = ["blocking"] }
 reqwest = { version = "0.12.15", features = ["blocking"] }
+regex = "1.11.1"
 
 [package.metadata.bundle]
 name = "Swoncord"
