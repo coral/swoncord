@@ -156,3 +156,75 @@ fn extract_track_info(user_info: id) -> TrackInfo {
         // comment: get(user_info, "comment"),
     }
 }
+
+declare_script! {
+    #[language(JavaScript)]
+    #[source(r#"
+    function isRunning(appName) {
+        const systemEvents = Application("System Events");
+        return systemEvents.processes.name().includes(appName);
+    }
+
+    function get() {
+        if (!isRunning("Swinsian")) {
+            return { state: "stopped" };
+        }
+
+        const swinsian = Application("Swinsian");
+        const state = swinsian.playerState();
+
+        if (state === "stopped") {
+            return { state: "stopped" };
+        }
+
+        const track = swinsian.currentTrack();
+
+        return {
+            state: state,
+            track: {
+                format: track.kind(),
+                song: track.name(),
+                artist: track.artist(),
+                album: track.album(),
+                pos: swinsian.playerPosition(),
+                dur: track.duration()
+            }
+        };
+    }
+"#)]
+    pub SwinsianState {
+        pub fn get() -> PlayerState;
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum PlaybackState {
+    Playing,
+    Paused,
+    Stopped,
+    Unknown,
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
+struct Track {
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub song: String,
+    #[serde(default)]
+    pub artist: String,
+    #[serde(default)]
+    pub album: String,
+    #[serde(default)]
+    pub pos: f64,
+    #[serde(default)]
+    pub dur: f64,
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
+struct PlayerState {
+    pub state: PlaybackState,
+    #[serde(default)]
+    pub track: Option<Track>,
+}
