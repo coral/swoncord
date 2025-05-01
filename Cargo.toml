@@ -16,7 +16,7 @@ musicbrainz_rs = {version = "0.9.1", default-features = false, features = ["bloc
 reqwest = { version = "0.12.15", features = ["blocking"] }
 regex = "1.11.1"
 serde = "1.0.219"
-osakit = "0.3.1"
+osakit = { version = "0.3.1", features = ["full"]}
 
 [package.metadata.bundle]
 name = "Swoncord"
