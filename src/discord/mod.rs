@@ -56,7 +56,7 @@ impl Discord {
         let mut current: Option<TrackInfo> = None;
         let mut last_state = State::Unknown;
         let mut cover: Option<String> = None;
-        let mut anchor: Option<(i64, i64)> = None;
+        let mut anchor: Option<Anchor> = None;
 
         loop {
             if let Ok((state, track)) = rx.recv_timeout(consts::RECV_TIMEOUT) {
@@ -74,10 +74,13 @@ impl Discord {
                             anchor = None;
                             current = Some(track.clone());
                         }
-                        // The poll carries position; (re)anchor the progress bar.
-                        // Notifications carry none and leave the anchor as-is.
-                        if let (Some(pos), Some(dur)) = (track.position, track.duration) {
-                            anchor = Some(progress_anchor(pos, dur, unix_now()));
+                        // Both notifications (currentTime) and the poll
+                        // (position + duration) carry a position; (re)anchor
+                        // whenever one is present so progress survives a track
+                        // switch. Without a duration the bar is open-ended
+                        // (elapsed only) until the next poll bounds it.
+                        if let Some(pos) = track.position {
+                            anchor = Some(progress_anchor(pos, track.duration, unix_now()));
                         }
                     }
                 }
@@ -101,11 +104,11 @@ impl Discord {
         }
     }
 
-    pub fn update(
+    fn update(
         &mut self,
         t: &TrackInfo,
         cover: Option<String>,
-        anchor: Option<(i64, i64)>,
+        anchor: Option<Anchor>,
     ) -> Result<(), Error> {
         let state: String = format!("{} ", t.artist).chars().take(consts::FIELD_MAX).collect();
         let details: String = t.title.chars().take(consts::FIELD_MAX).collect();
@@ -124,11 +127,16 @@ impl Discord {
             .activity_type(activity::ActivityType::Listening)
             .assets(assets);
 
-        // Progress bar: Discord ticks from `start` toward `end` on its own, so we
-        // only set absolute timestamps (recomputed from a fresh position by the
-        // pump), not an elapsed counter.
-        if let Some((start, end)) = anchor {
-            payload = payload.timestamps(activity::Timestamps::new().start(start).end(end));
+        // Progress bar: Discord ticks from `start` on its own, so we set absolute
+        // timestamps (recomputed from a fresh position by the pump). With an
+        // `end` it renders a bounded bar; without one, an open-ended elapsed
+        // counter (the case right after a track switch, before the next poll).
+        if let Some(anchor) = anchor {
+            let mut timestamps = activity::Timestamps::new().start(anchor.start);
+            if let Some(end) = anchor.end {
+                timestamps = timestamps.end(end);
+            }
+            payload = payload.timestamps(timestamps);
         }
 
         if Instant::now().duration_since(self.last_updated) >= consts::UPDATE_THROTTLE {
@@ -147,7 +155,7 @@ impl Discord {
         Ok(())
     }
 
-    pub fn clear(&mut self) -> Result<(), Error> {
+    fn clear(&mut self) -> Result<(), Error> {
         let throttled =
             Instant::now().duration_since(self.last_updated) < consts::UPDATE_THROTTLE;
         if matches!(self.state, PresenceState::Active) && !throttled {
@@ -181,6 +189,14 @@ fn album_differs(current: Option<&TrackInfo>, incoming: &TrackInfo) -> bool {
     current.is_none_or(|c| c.album != incoming.album)
 }
 
+/// Absolute timestamps for the Discord progress bar. `end` is unknown until a
+/// poll reports the track duration, so it's optional (open-ended elapsed bar).
+#[derive(Clone, Copy)]
+struct Anchor {
+    start: i64,
+    end: Option<i64>,
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -188,11 +204,14 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Absolute (start, end) unix seconds for the Discord progress bar, derived from
-/// the current playback `pos` and track `dur`.
-fn progress_anchor(pos: f64, dur: f64, now: i64) -> (i64, i64) {
+/// Anchor for the Discord progress bar, derived from the current playback `pos`
+/// and (when known) track `dur`, both in seconds.
+fn progress_anchor(pos: f64, dur: Option<f64>, now: i64) -> Anchor {
     let start = now - pos as i64;
-    (start, start + dur as i64)
+    Anchor {
+        start,
+        end: dur.map(|d| start + d as i64),
+    }
 }
 
 #[cfg(test)]
@@ -248,7 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn progress_anchor_offsets_start_and_end() {
-        assert_eq!(progress_anchor(30.0, 200.0, 1000), (970, 1170));
+    fn progress_anchor_with_duration_bounds_end() {
+        let a = progress_anchor(30.0, Some(200.0), 1000);
+        assert_eq!(a.start, 970);
+        assert_eq!(a.end, Some(1170));
+    }
+
+    #[test]
+    fn progress_anchor_without_duration_is_open_ended() {
+        let a = progress_anchor(30.0, None, 1000);
+        assert_eq!(a.start, 970);
+        assert_eq!(a.end, None);
     }
 }

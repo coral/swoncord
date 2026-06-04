@@ -13,6 +13,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSArray",
     "NSEnumerator",
     "NSObject",
+    "NSValue",
     "NSNotification",
     "NSDistributedNotificationCenter",
     "NSOperation",
@@ -51,6 +52,13 @@ osakit = { version = "0.3.1", features = ["full"]}
 
 [dev-dependencies]
 serde_json = "1"
+
+[profile.release]
+opt-level = 3        # maximum runtime optimization
+lto = "fat"          # whole-program link-time optimization across all crates
+codegen-units = 1    # one unit = best optimization (slower compile)
+panic = "abort"      # smaller/faster; no unwinding tables
+strip = true         # drop debug symbols from the final binary
 
 [package.metadata.bundle]
 name = "Swoncord"
