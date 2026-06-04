@@ -95,22 +95,31 @@ impl Discord {
         anchor: Option<Anchor>,
         force: bool,
     ) -> Result<(), Error> {
-        let state: String = format!("{} ", t.artist).chars().take(FIELD_MAX).collect();
-        let details: String = t.title.chars().take(FIELD_MAX).collect();
-        let large_text: String = t.album.chars().take(FIELD_MAX).collect();
+        // Discord rejects the whole activity if any text field is outside 2..=128
+        // chars, so short fields (e.g. a one-letter title "J") are padded and
+        // empty ones omitted.
+        let state = presence_field(&t.artist);
+        let details = presence_field(&t.title);
+        let large_text = presence_field(&t.album);
 
         let uri = cover.unwrap_or_else(|| "sw2".to_string());
 
-        let assets = activity::Assets::new()
-            .large_text(large_text.as_str())
+        let mut assets = activity::Assets::new()
             .large_image(&uri)
             .small_text("Listening");
+        if let Some(text) = &large_text {
+            assets = assets.large_text(text);
+        }
 
         let mut payload = activity::Activity::new()
-            .state(&state)
-            .details(&details)
             .activity_type(activity::ActivityType::Listening)
             .assets(assets);
+        if let Some(state) = &state {
+            payload = payload.state(state);
+        }
+        if let Some(details) = &details {
+            payload = payload.details(details);
+        }
 
         // Progress bar: Discord ticks from `start` on its own, so we set absolute
         // timestamps (recomputed from a fresh position by the pump). With an
@@ -217,6 +226,22 @@ impl Playback {
     }
 }
 
+/// Prepares a value for a Discord presence text field, which must be 2–128
+/// characters or the whole activity is rejected. Truncates to the max, pads
+/// values shorter than two chars (e.g. a one-letter title "J"), and returns
+/// `None` for empty values so the field is omitted rather than sent blank.
+fn presence_field(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut field: String = trimmed.chars().take(FIELD_MAX).collect();
+    while field.chars().count() < 2 {
+        field.push(' ');
+    }
+    Some(field)
+}
+
 /// Whether `incoming` is the same track as `current` (ignoring position, so a
 /// poll-vs-notification difference doesn't count as a new track).
 fn same_track(current: Option<&TrackInfo>, incoming: &TrackInfo) -> bool {
@@ -309,6 +334,20 @@ mod tests {
         let b = full_track("Artist", "Album", "Song Two");
         assert!(!same_track(Some(&a), &b));
         assert!(!same_track(None, &b));
+    }
+
+    #[test]
+    fn presence_field_pads_short_drops_empty_keeps_normal() {
+        assert_eq!(presence_field("J").as_deref(), Some("J "));
+        assert_eq!(presence_field(""), None);
+        assert_eq!(presence_field("   "), None);
+        assert_eq!(presence_field("Normal Title").as_deref(), Some("Normal Title"));
+    }
+
+    #[test]
+    fn presence_field_truncates_to_max() {
+        let long = "x".repeat(FIELD_MAX + 50);
+        assert_eq!(presence_field(&long).unwrap().chars().count(), FIELD_MAX);
     }
 
     #[test]
