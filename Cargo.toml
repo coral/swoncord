@@ -4,19 +4,53 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-objc = "0.2.7"
-cocoa = "0.24"
-block = "0.1"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "NSString",
+    "NSDictionary",
+    "NSArray",
+    "NSEnumerator",
+    "NSObject",
+    "NSNotification",
+    "NSDistributedNotificationCenter",
+    "NSOperation",
+    "NSGeometry",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSResponder",
+    "NSApplication",
+    "NSRunningApplication",
+    "NSStatusBar",
+    "NSStatusItem",
+    "NSStatusBarButton",
+    "NSMenu",
+    "NSMenuItem",
+    "NSImage",
+    "NSControl",
+    "NSView",
+    "NSButton",
+] }
+block2 = "0.6.2"
 crossbeam = "0.8.4"
-discord-rich-presence = "0.2.5"
-log = "0.4.17"
+discord-rich-presence = "1.1.0"
+log = "0.4.32"
 pretty_env_logger = "0.5.0"
-thiserror = "2.0.12"
-musicbrainz_rs = {version = "0.9.1", default-features = false, features = ["blocking"] }
-reqwest = { version = "0.12.15", features = ["blocking"] }
-regex = "1.11.1"
-serde = "1.0.219"
+thiserror = "2.0.18"
+musicbrainz_rs = { version = "0.13.0", default-features = false, features = ["sync", "rustls"] }
+reqwest = { version = "0.13.4", features = ["blocking"] }
+regex = "1.12.3"
+serde = "1.0.228"
 osakit = { version = "0.3.1", features = ["full"]}
+
+[lints.rust]
+# The old `objc` 0.2 `sel!`/`msg_send!` macros expand to `cfg(cargo-clippy)` /
+# feature checks that rustc can't validate; this silences that macro-origin noise
+# (a per-file `#![allow]` doesn't reach macro expansions).
+unexpected_cfgs = "allow"
 
 [package.metadata.bundle]
 name = "Swoncord"
