@@ -15,6 +15,16 @@ pub const UPDATE_THROTTLE: Duration = Duration::from_secs(4);
 /// How long the consumer waits for a track update before re-evaluating state.
 pub const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How often the AppleScript pull source polls Swinsian, in seconds
+/// (`NSTimer` takes an `NSTimeInterval`). Supplements notifications: catches
+/// cold starts, corrects progress, and detects a quit as a backstop.
+pub const POLL_INTERVAL_SECS: f64 = 30.0;
+
+/// Swinsian's bundle identifier and display name, used to recognize it among
+/// terminated apps in the workspace watcher.
+pub const SWINSIAN_BUNDLE_ID: &str = "com.swinsian.Swinsian";
+pub const SWINSIAN_APP_NAME: &str = "Swinsian";
+
 /// Network timeout for MusicBrainz / CoverArtArchive requests, so a slow
 /// upstream can't stall the presence thread.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);

@@ -11,7 +11,9 @@ mod source;
 mod track;
 
 use source::TrackSource;
+use source::applescript::AppleScriptSource;
 use source::notification::NotificationSource;
+use source::workspace::WorkspaceWatcher;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     pretty_env_logger::init();
@@ -27,8 +29,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = macos::Wrapper::new(mtm)?;
     app.configure();
 
-    // Push source today; the Phase-2 osakit pull source would be selected here.
-    NotificationSource.start(tx);
+    // All three sources share the channel: notifications (live play/pause/track),
+    // the AppleScript poll (startup + progress + quit backstop), and the
+    // workspace watcher (instant quit). They register on the main run loop.
+    NotificationSource.start(tx.clone());
+    AppleScriptSource.start(tx.clone());
+    WorkspaceWatcher.start(tx);
 
     app.run();
     Ok(())

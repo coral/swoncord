@@ -10,7 +10,7 @@ use crossbeam::channel::Receiver;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use log::error;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 enum PresenceState {
     Active,
@@ -42,56 +42,71 @@ impl Discord {
         Ok(shared)
     }
 
-    /// Background loop: receives track updates, refreshes album art on album
-    /// change, and reflects playback state into Discord.
+    /// Background loop: receives track updates from all sources, refreshes album
+    /// art on album change, tracks playback progress, and reflects state into
+    /// Discord.
+    ///
+    /// Updates are deduplicated by track identity so a position-less notification
+    /// for the current track doesn't wipe the `position` learned from a poll. The
+    /// `anchor` (start/end unix seconds) is (re)computed only when a message
+    /// carries position+duration, and reset when the track changes.
     fn pump(rx: Receiver<(State, TrackInfo)>, shared: Arc<Mutex<Self>>) {
         let album_art = AlbumArtRequester::new();
 
         let mut current: Option<TrackInfo> = None;
         let mut last_state = State::Unknown;
         let mut cover: Option<String> = None;
+        let mut anchor: Option<(i64, i64)> = None;
 
         loop {
             if let Ok((state, track)) = rx.recv_timeout(consts::RECV_TIMEOUT) {
                 last_state = state;
-                let incoming = Some(track);
-                if current != incoming {
-                    if Self::album_changed(&current, &incoming) {
-                        cover = incoming
-                            .as_ref()
-                            .and_then(|t| album_art.get_album_art(t).ok());
+                match state {
+                    State::Stopped | State::Unknown => {
+                        current = None;
+                        anchor = None;
                     }
-                    current = incoming;
+                    State::Playing | State::Paused => {
+                        if !same_track(current.as_ref(), &track) {
+                            if album_differs(current.as_ref(), &track) {
+                                cover = album_art.get_album_art(&track).ok();
+                            }
+                            anchor = None;
+                            current = Some(track.clone());
+                        }
+                        // The poll carries position; (re)anchor the progress bar.
+                        // Notifications carry none and leave the anchor as-is.
+                        if let (Some(pos), Some(dur)) = (track.position, track.duration) {
+                            anchor = Some(progress_anchor(pos, dur, unix_now()));
+                        }
+                    }
                 }
             }
 
-            if let Some(track) = &current {
-                let mut discord = shared.lock().expect("discord mutex poisoned");
-                match last_state {
-                    State::Playing => {
-                        if let Err(e) = discord.update(track, cover.clone()) {
-                            error!("Error updating Discord status: {e:?}");
-                        }
+            let mut discord = shared.lock().expect("discord mutex poisoned");
+            match last_state {
+                State::Playing => {
+                    if let Some(track) = &current
+                        && let Err(e) = discord.update(track, cover.clone(), anchor)
+                    {
+                        error!("Error updating Discord status: {e:?}");
                     }
-                    State::Stopped | State::Paused | State::Unknown => {
-                        if let Err(e) = discord.clear() {
-                            error!("Error clearing Discord status: {e:?}");
-                        }
+                }
+                State::Stopped | State::Paused | State::Unknown => {
+                    if let Err(e) = discord.clear() {
+                        error!("Error clearing Discord status: {e:?}");
                     }
                 }
             }
         }
     }
 
-    fn album_changed(last: &Option<TrackInfo>, current: &Option<TrackInfo>) -> bool {
-        match (last, current) {
-            (None, Some(_)) => true,
-            (Some(last), Some(current)) => last.album != current.album,
-            _ => false,
-        }
-    }
-
-    pub fn update(&mut self, t: &TrackInfo, cover: Option<String>) -> Result<(), Error> {
+    pub fn update(
+        &mut self,
+        t: &TrackInfo,
+        cover: Option<String>,
+        anchor: Option<(i64, i64)>,
+    ) -> Result<(), Error> {
         let state: String = format!("{} ", t.artist).chars().take(consts::FIELD_MAX).collect();
         let details: String = t.title.chars().take(consts::FIELD_MAX).collect();
         let large_text: String = t.album.chars().take(consts::FIELD_MAX).collect();
@@ -103,13 +118,18 @@ impl Discord {
             .large_image(&uri)
             .small_text("Listening");
 
-        let payload = activity::Activity::new()
+        let mut payload = activity::Activity::new()
             .state(&state)
             .details(&details)
             .activity_type(activity::ActivityType::Listening)
             .assets(assets);
-        // TODO(phase 2): when t.position/duration are set (pull source), attach
-        // activity::Timestamps to render the Discord progress bar.
+
+        // Progress bar: Discord ticks from `start` toward `end` on its own, so we
+        // only set absolute timestamps (recomputed from a fresh position by the
+        // pump), not an elapsed counter.
+        if let Some((start, end)) = anchor {
+            payload = payload.timestamps(activity::Timestamps::new().start(start).end(end));
+        }
 
         if Instant::now().duration_since(self.last_updated) >= consts::UPDATE_THROTTLE {
             match self.client.set_activity(payload) {
@@ -144,6 +164,37 @@ impl Discord {
     }
 }
 
+/// Whether `incoming` is the same track as `current` (ignoring position, so a
+/// poll-vs-notification difference doesn't count as a new track).
+fn same_track(current: Option<&TrackInfo>, incoming: &TrackInfo) -> bool {
+    match current {
+        Some(c) => {
+            c.artist == incoming.artist && c.album == incoming.album && c.title == incoming.title
+        }
+        None => false,
+    }
+}
+
+/// Whether `incoming`'s album differs from `current`'s (i.e. cover art must be
+/// refetched). A `None` current counts as a change.
+fn album_differs(current: Option<&TrackInfo>, incoming: &TrackInfo) -> bool {
+    current.is_none_or(|c| c.album != incoming.album)
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Absolute (start, end) unix seconds for the Discord progress bar, derived from
+/// the current playback `pos` and track `dur`.
+fn progress_anchor(pos: f64, dur: f64, now: i64) -> (i64, i64) {
+    let start = now - pos as i64;
+    (start, start + dur as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,24 +206,49 @@ mod tests {
         }
     }
 
-    #[test]
-    fn album_changed_on_first_track() {
-        assert!(Discord::album_changed(&None, &Some(track("A"))));
+    fn full_track(artist: &str, album: &str, title: &str) -> TrackInfo {
+        TrackInfo {
+            artist: artist.to_string(),
+            album: album.to_string(),
+            title: title.to_string(),
+            ..Default::default()
+        }
     }
 
     #[test]
-    fn album_changed_when_album_differs() {
-        assert!(Discord::album_changed(&Some(track("A")), &Some(track("B"))));
+    fn album_differs_on_first_track() {
+        assert!(album_differs(None, &track("A")));
     }
 
     #[test]
-    fn album_unchanged_when_same_album() {
-        assert!(!Discord::album_changed(&Some(track("A")), &Some(track("A"))));
+    fn album_differs_when_album_changes() {
+        assert!(album_differs(Some(&track("A")), &track("B")));
     }
 
     #[test]
-    fn album_unchanged_when_cleared() {
-        assert!(!Discord::album_changed(&Some(track("A")), &None));
-        assert!(!Discord::album_changed(&None, &None));
+    fn album_same_when_album_unchanged() {
+        assert!(!album_differs(Some(&track("A")), &track("A")));
+    }
+
+    #[test]
+    fn same_track_matches_identity_ignoring_position() {
+        let mut a = full_track("Artist", "Album", "Song");
+        let mut b = full_track("Artist", "Album", "Song");
+        a.position = None;
+        b.position = Some(42.0); // a poll-vs-notification difference
+        assert!(same_track(Some(&a), &b));
+    }
+
+    #[test]
+    fn same_track_distinguishes_different_song() {
+        let a = full_track("Artist", "Album", "Song One");
+        let b = full_track("Artist", "Album", "Song Two");
+        assert!(!same_track(Some(&a), &b));
+        assert!(!same_track(None, &b));
+    }
+
+    #[test]
+    fn progress_anchor_offsets_start_and_end() {
+        assert_eq!(progress_anchor(30.0, 200.0, 1000), (970, 1170));
     }
 }

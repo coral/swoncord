@@ -1779,6 +1779,7 @@ dependencies = [
  "regex",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 

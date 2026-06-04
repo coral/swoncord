@@ -5,17 +5,21 @@
 //!
 //! - [`notification`]: the live push source, driven by macOS distributed
 //!   notifications from Swinsian.
-//! - [`applescript`]: a planned pull source that polls Swinsian via JXA (osakit).
+//! - [`applescript`]: a pull source that polls Swinsian via JXA (osakit) at
+//!   startup and every 30s, supplying playback position and catching gaps the
+//!   notifications miss.
+//! - [`workspace`]: watches for Swinsian quitting and reports `Stopped`.
 //!
-//! Both run on the **main thread** — observers and the (future) poll timer hook
-//! into the main run loop, and osakit requires the main thread. Only the Discord
-//! consumer is backgrounded.
+//! All run on the **main thread** — observers and the poll timer hook into the
+//! main run loop, and osakit requires the main thread. Only the Discord
+//! consumer is backgrounded. Sources share the channel; the `Sender` is cloned.
 
 use crate::track::{State, TrackInfo};
 use crossbeam::channel::Sender;
 
 pub mod applescript;
 pub mod notification;
+pub mod workspace;
 
 /// Channel sink a source pushes track updates into.
 pub type TrackTx = Sender<(State, TrackInfo)>;
