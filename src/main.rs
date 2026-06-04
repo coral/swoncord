@@ -1,8 +1,9 @@
 use crossbeam::channel::bounded;
 use log::info;
 use objc2::MainThreadMarker;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
-mod consts;
 mod discord;
 mod error;
 mod macos;
@@ -22,16 +23,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mtm = MainThreadMarker::new().expect("main must run on the main thread");
     let (tx, rx) = bounded(100);
 
-    // Discord runs the only background thread, consuming track updates.
-    let _discord = discord::Discord::new(rx)?;
+    let enabled = Arc::new(AtomicBool::new(true));
+    let (wake_tx, wake_rx) = bounded::<()>(1);
 
-    // The menu-bar app and track sources stay on the main thread.
-    let mut app = macos::Wrapper::new(mtm)?;
+    // background thread for discord
+    let _discord = discord::Discord::new(rx, enabled.clone(), wake_rx)?;
+
+    // osx menu bar on main thread
+    let mut app = macos::Wrapper::new(mtm, enabled, wake_tx)?;
     app.configure();
 
-    // All three sources share the channel: notifications (live play/pause/track),
-    // the AppleScript poll (startup + progress + quit backstop), and the
-    // workspace watcher (instant quit). They register on the main run loop.
+    // shared communication
     NotificationSource.start(tx.clone());
     AppleScriptSource.start(tx.clone());
     WorkspaceWatcher.start(tx);

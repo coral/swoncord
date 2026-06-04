@@ -1,6 +1,11 @@
 //! Domain types shared between track sources and the Discord consumer.
 
-use crate::consts;
+/// Distributed-notification name Swinsian posts when playback starts.
+pub const SWINSIAN_TRACK_PLAYING: &str = "com.swinsian.Swinsian-Track-Playing";
+/// Distributed-notification name Swinsian posts when playback stops.
+pub const SWINSIAN_TRACK_STOPPED: &str = "com.swinsian.Swinsian-Track-Stopped";
+/// Distributed-notification name Swinsian posts when playback pauses.
+pub const SWINSIAN_TRACK_PAUSED: &str = "com.swinsian.Swinsian-Track-Paused";
 
 /// Metadata for the currently-playing track.
 ///
@@ -18,20 +23,21 @@ pub struct TrackInfo {
 }
 
 /// Playback state derived from a Swinsian notification name.
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub enum State {
     Playing,
     Stopped,
     Paused,
+    #[default]
     Unknown,
 }
 
 impl From<&str> for State {
     fn from(notification_name: &str) -> Self {
         match notification_name {
-            consts::SWINSIAN_TRACK_PLAYING => State::Playing,
-            consts::SWINSIAN_TRACK_STOPPED => State::Stopped,
-            consts::SWINSIAN_TRACK_PAUSED => State::Paused,
+            SWINSIAN_TRACK_PLAYING => State::Playing,
+            SWINSIAN_TRACK_STOPPED => State::Stopped,
+            SWINSIAN_TRACK_PAUSED => State::Paused,
             _ => State::Unknown,
         }
     }
@@ -43,9 +49,9 @@ mod tests {
 
     #[test]
     fn state_from_known_notification_names() {
-        assert_eq!(State::from(consts::SWINSIAN_TRACK_PLAYING), State::Playing);
-        assert_eq!(State::from(consts::SWINSIAN_TRACK_STOPPED), State::Stopped);
-        assert_eq!(State::from(consts::SWINSIAN_TRACK_PAUSED), State::Paused);
+        assert_eq!(State::from(SWINSIAN_TRACK_PLAYING), State::Playing);
+        assert_eq!(State::from(SWINSIAN_TRACK_STOPPED), State::Stopped);
+        assert_eq!(State::from(SWINSIAN_TRACK_PAUSED), State::Paused);
     }
 
     #[test]

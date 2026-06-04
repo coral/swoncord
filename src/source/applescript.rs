@@ -2,16 +2,15 @@
 //!
 //! Notifications only fire while both Swinsian and swoncord are running, carry no
 //! playback position, and never signal a quit. This source polls once at startup
-//! and every [`consts::POLL_INTERVAL_SECS`] to close those gaps: it picks up a
-//! track already playing at launch, reports `position`/`duration` to drive the
-//! progress bar, and reports "stopped" when Swinsian isn't running (a backstop to
-//! the [`super::workspace`] quit observer).
+//! and every [`POLL_INTERVAL_SECS`] to close those gaps: it picks up a track
+//! already playing at launch, reports `position`/`duration` to drive the progress
+//! bar, and reports "stopped" when Swinsian isn't running (a backstop to the
+//! [`super::workspace`] quit observer).
 //!
 //! osakit must run on the main thread, so the poll is driven by an `NSTimer`
 //! scheduled on the main run loop rather than a background thread.
 
 use super::{TrackSource, TrackTx};
-use crate::consts;
 use crate::track::{State, TrackInfo};
 use block2::RcBlock;
 use log::error;
@@ -19,6 +18,11 @@ use objc2_foundation::NSTimer;
 use osakit::declare_script;
 use serde::Deserialize;
 use std::ptr::NonNull;
+
+/// How often to poll Swinsian, in seconds (`NSTimer` takes an `NSTimeInterval`).
+/// Supplements notifications: catches cold starts, corrects progress, and detects
+/// a quit as a backstop.
+const POLL_INTERVAL_SECS: f64 = 30.0;
 
 declare_script! {
     #[language(JavaScript)]
@@ -149,7 +153,7 @@ impl TrackSource for AppleScriptSource {
         // where osakit requires it. The timer retains the block.
         unsafe {
             let _timer = NSTimer::scheduledTimerWithTimeInterval_repeats_block(
-                consts::POLL_INTERVAL_SECS,
+                POLL_INTERVAL_SECS,
                 true,
                 &block,
             );

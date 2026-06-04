@@ -1,6 +1,5 @@
 //! Album art lookup via MusicBrainz + CoverArtArchive.
 
-use crate::consts;
 use crate::error::Error;
 use crate::track::TrackInfo;
 use musicbrainz_rs::client::MusicBrainzClient;
@@ -8,6 +7,19 @@ use musicbrainz_rs::entity::release_group::{ReleaseGroup, ReleaseGroupSearchQuer
 use musicbrainz_rs::prelude::*;
 use regex::Regex;
 use reqwest::blocking::Client as HttpClient;
+use std::time::Duration;
+
+/// User-agent reported to the MusicBrainz API (their guidelines require one).
+const MUSICBRAINZ_USER_AGENT: &str = "SwinsianRichPresence/1.0.0 ( https://jonasbengtson.se )";
+
+/// Network timeout for CoverArtArchive requests, so a slow upstream can't stall
+/// the presence thread.
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Strips trailing parenthetical/bracketed qualifiers from an album name, e.g.
+/// "Album (Deluxe Edition)" or "Album [Remaster] (Bonus)" -> "Album". Used as a
+/// last-ditch broadening of the MusicBrainz search.
+const ALBUM_CLEAN_PATTERN: &str = r"\s+[\(\[][^\(\)\[\]]*[\)\]](\s+[\(\[][^\(\)\[\]]*[\)\]])*$";
 
 /// Resolves an album's front cover-art URL from its metadata.
 pub struct AlbumArtRequester {
@@ -19,19 +31,19 @@ pub struct AlbumArtRequester {
 
 impl AlbumArtRequester {
     pub fn new() -> Self {
-        let client = MusicBrainzClient::new(consts::MUSICBRAINZ_USER_AGENT);
+        let client = MusicBrainzClient::new(MUSICBRAINZ_USER_AGENT);
 
         // MusicBrainzClient manages its own (ureq-based) HTTP client internally;
         // we only control the CoverArtArchive request, so we give that one a
         // timeout to keep a slow upstream from stalling the consumer.
         let http = HttpClient::builder()
-            .timeout(consts::HTTP_TIMEOUT)
+            .timeout(HTTP_TIMEOUT)
             .build()
             .expect("HTTP client builds from a static config");
 
         // Constant pattern verified by the unit tests below.
         let album_filter =
-            Regex::new(consts::ALBUM_CLEAN_PATTERN).expect("album-clean regex is valid");
+            Regex::new(ALBUM_CLEAN_PATTERN).expect("album-clean regex is valid");
 
         Self {
             client,

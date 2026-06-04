@@ -7,7 +7,6 @@
 //! this misses (e.g. force-kill).
 
 use super::{TrackSource, TrackTx};
-use crate::consts;
 use crate::track::{State, TrackInfo};
 use block2::RcBlock;
 use log::error;
@@ -17,6 +16,11 @@ use objc2_app_kit::{
 };
 use objc2_foundation::NSNotification;
 use std::ptr::NonNull;
+
+/// Swinsian's bundle identifier and display name, used to recognize it among
+/// terminated apps.
+const SWINSIAN_BUNDLE_ID: &str = "com.swinsian.Swinsian";
+const SWINSIAN_APP_NAME: &str = "Swinsian";
 
 /// Observes app terminations and reports `Stopped` when Swinsian quits.
 pub struct WorkspaceWatcher;
@@ -66,9 +70,9 @@ fn terminated_app_is_swinsian(notification: &NSNotification) -> bool {
 
     let by_bundle = app
         .bundleIdentifier()
-        .is_some_and(|id| id.to_string() == consts::SWINSIAN_BUNDLE_ID);
+        .is_some_and(|id| id.to_string() == SWINSIAN_BUNDLE_ID);
     let by_name = app
         .localizedName()
-        .is_some_and(|name| name.to_string() == consts::SWINSIAN_APP_NAME);
+        .is_some_and(|name| name.to_string() == SWINSIAN_APP_NAME);
     by_bundle || by_name
 }

@@ -1,9 +1,10 @@
 //! Push source: macOS distributed notifications posted by Swinsian.
 
 use super::{TrackSource, TrackTx};
-use crate::consts;
 use crate::objc_util::{describe_dictionary, track_info_from_user_info};
-use crate::track::State;
+use crate::track::{
+    SWINSIAN_TRACK_PAUSED, SWINSIAN_TRACK_PLAYING, SWINSIAN_TRACK_STOPPED, State,
+};
 use block2::RcBlock;
 use log::error;
 use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
@@ -12,6 +13,13 @@ use std::ptr::NonNull;
 /// Env var that, when set, logs every Swinsian notification's name and full
 /// `userInfo` — a developer aid for discovering which keys/values Swinsian sends.
 const DEBUG_ENV: &str = "SWONCORD_DEBUG_NOTIFICATIONS";
+
+/// The Swinsian notifications this source registers observers for.
+const SWINSIAN_NOTIFICATIONS: [&str; 3] = [
+    SWINSIAN_TRACK_PLAYING,
+    SWINSIAN_TRACK_STOPPED,
+    SWINSIAN_TRACK_PAUSED,
+];
 
 /// Observes Swinsian's distributed notifications and forwards each as a track
 /// update. Registered on the main run loop; the OS invokes the block there.
@@ -48,7 +56,7 @@ impl TrackSource for NotificationSource {
             }
         });
 
-        for name in consts::SWINSIAN_NOTIFICATIONS {
+        for name in SWINSIAN_NOTIFICATIONS {
             let ns_name = NSString::from_str(name);
             // Safe: nil object/queue is valid, and the block matches the
             // expected `Fn(NonNull<NSNotification>)` signature. The center

@@ -2,15 +2,27 @@
 
 mod albumart;
 
-use crate::consts;
 use crate::error::Error;
 use crate::track::{State, TrackInfo};
 use albumart::AlbumArtRequester;
 use crossbeam::channel::Receiver;
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use log::error;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// Discord application ID this presence runs under.
+const DISCORD_APP_ID: &str = "1076384656850698240";
+
+/// Minimum time between Discord activity writes, to stay under its rate limit.
+const UPDATE_THROTTLE: Duration = Duration::from_secs(4);
+
+/// How long the consumer waits for an event before re-evaluating state.
+const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Max length of a Discord rich-presence text field (state/details/large_text).
+const FIELD_MAX: usize = 128;
 
 enum PresenceState {
     Active,
@@ -26,8 +38,12 @@ pub struct Discord {
 impl Discord {
     /// Connects to Discord and spawns the background consumer that reads track
     /// updates from `rx`. Returns the shared client so the caller keeps it alive.
-    pub fn new(rx: Receiver<(State, TrackInfo)>) -> Result<Arc<Mutex<Self>>, Error> {
-        let mut client = DiscordIpcClient::new(consts::DISCORD_APP_ID);
+    pub fn new(
+        rx: Receiver<(State, TrackInfo)>,
+        enabled: Arc<AtomicBool>,
+        wake: Receiver<()>,
+    ) -> Result<Arc<Mutex<Self>>, Error> {
+        let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
         client.connect()?;
 
         let shared = Arc::new(Mutex::new(Self {
@@ -37,70 +53,38 @@ impl Discord {
         }));
 
         let consumer = shared.clone();
-        std::thread::spawn(move || Self::pump(rx, consumer));
+        std::thread::spawn(move || Self::pump(rx, consumer, enabled, wake));
 
         Ok(shared)
     }
 
-    /// Background loop: receives track updates from all sources, refreshes album
-    /// art on album change, tracks playback progress, and reflects state into
-    /// Discord.
-    ///
-    /// Updates are deduplicated by track identity so a position-less notification
-    /// for the current track doesn't wipe the `position` learned from a poll. The
-    /// `anchor` (start/end unix seconds) is (re)computed only when a message
-    /// carries position+duration, and reset when the track changes.
-    fn pump(rx: Receiver<(State, TrackInfo)>, shared: Arc<Mutex<Self>>) {
+    /// Background loop: waits for a source update, a menu toggle (`wake`), or a
+    /// timeout, then reflects the current [`Playback`] into Discord.
+    fn pump(
+        rx: Receiver<(State, TrackInfo)>,
+        shared: Arc<Mutex<Self>>,
+        enabled: Arc<AtomicBool>,
+        wake: Receiver<()>,
+    ) {
         let album_art = AlbumArtRequester::new();
-
-        let mut current: Option<TrackInfo> = None;
-        let mut last_state = State::Unknown;
-        let mut cover: Option<String> = None;
-        let mut anchor: Option<Anchor> = None;
+        let mut playback = Playback::default();
 
         loop {
-            if let Ok((state, track)) = rx.recv_timeout(consts::RECV_TIMEOUT) {
-                last_state = state;
-                match state {
-                    State::Stopped | State::Unknown => {
-                        current = None;
-                        anchor = None;
+            // A menu toggle forces an immediate (un-throttled) re-dispatch;
+            // source updates and the timeout use the normal cadence.
+            let force = crossbeam::channel::select! {
+                recv(rx) -> msg => {
+                    if let Ok((state, track)) = msg {
+                        playback.apply(state, track, &album_art);
                     }
-                    State::Playing | State::Paused => {
-                        if !same_track(current.as_ref(), &track) {
-                            if album_differs(current.as_ref(), &track) {
-                                cover = album_art.get_album_art(&track).ok();
-                            }
-                            anchor = None;
-                            current = Some(track.clone());
-                        }
-                        // Both notifications (currentTime) and the poll
-                        // (position + duration) carry a position; (re)anchor
-                        // whenever one is present so progress survives a track
-                        // switch. Without a duration the bar is open-ended
-                        // (elapsed only) until the next poll bounds it.
-                        if let Some(pos) = track.position {
-                            anchor = Some(progress_anchor(pos, track.duration, unix_now()));
-                        }
-                    }
+                    false
                 }
-            }
+                recv(wake) -> _ => true,
+                default(RECV_TIMEOUT) => false,
+            };
 
             let mut discord = shared.lock().expect("discord mutex poisoned");
-            match last_state {
-                State::Playing => {
-                    if let Some(track) = &current
-                        && let Err(e) = discord.update(track, cover.clone(), anchor)
-                    {
-                        error!("Error updating Discord status: {e:?}");
-                    }
-                }
-                State::Stopped | State::Paused | State::Unknown => {
-                    if let Err(e) = discord.clear() {
-                        error!("Error clearing Discord status: {e:?}");
-                    }
-                }
-            }
+            playback.publish(&mut discord, enabled.load(Ordering::Relaxed), force);
         }
     }
 
@@ -109,10 +93,11 @@ impl Discord {
         t: &TrackInfo,
         cover: Option<String>,
         anchor: Option<Anchor>,
+        force: bool,
     ) -> Result<(), Error> {
-        let state: String = format!("{} ", t.artist).chars().take(consts::FIELD_MAX).collect();
-        let details: String = t.title.chars().take(consts::FIELD_MAX).collect();
-        let large_text: String = t.album.chars().take(consts::FIELD_MAX).collect();
+        let state: String = format!("{} ", t.artist).chars().take(FIELD_MAX).collect();
+        let details: String = t.title.chars().take(FIELD_MAX).collect();
+        let large_text: String = t.album.chars().take(FIELD_MAX).collect();
 
         let uri = cover.unwrap_or_else(|| "sw2".to_string());
 
@@ -139,7 +124,7 @@ impl Discord {
             payload = payload.timestamps(timestamps);
         }
 
-        if Instant::now().duration_since(self.last_updated) >= consts::UPDATE_THROTTLE {
+        if force || Instant::now().duration_since(self.last_updated) >= UPDATE_THROTTLE {
             match self.client.set_activity(payload) {
                 Ok(_) => self.last_updated = Instant::now(),
                 Err(e) => {
@@ -155,10 +140,10 @@ impl Discord {
         Ok(())
     }
 
-    fn clear(&mut self) -> Result<(), Error> {
+    fn clear(&mut self, force: bool) -> Result<(), Error> {
         let throttled =
-            Instant::now().duration_since(self.last_updated) < consts::UPDATE_THROTTLE;
-        if matches!(self.state, PresenceState::Active) && !throttled {
+            Instant::now().duration_since(self.last_updated) < UPDATE_THROTTLE;
+        if matches!(self.state, PresenceState::Active) && (force || !throttled) {
             if self.client.clear_activity().is_err() {
                 if let Err(e) = self.client.reconnect() {
                     error!("Discord reconnect failed: {e:?}");
@@ -169,6 +154,66 @@ impl Discord {
             }
         }
         Ok(())
+    }
+}
+
+/// The playback state the pump tracks across events, and how it's mirrored into
+/// Discord.
+///
+/// Updates are deduplicated by track identity, so a position-less notification
+/// for the current track doesn't wipe the `position` learned from a poll. The
+/// `anchor` is (re)computed only when a message carries a position, and reset
+/// when the track changes.
+#[derive(Default)]
+struct Playback {
+    current: Option<TrackInfo>,
+    last_state: State,
+    cover: Option<String>,
+    anchor: Option<Anchor>,
+}
+
+impl Playback {
+    /// Folds a source update into the tracked state.
+    fn apply(&mut self, state: State, track: TrackInfo, album_art: &AlbumArtRequester) {
+        self.last_state = state;
+        match state {
+            State::Stopped | State::Unknown => {
+                self.current = None;
+                self.anchor = None;
+            }
+            State::Playing | State::Paused => {
+                let (position, duration) = (track.position, track.duration);
+                if !same_track(self.current.as_ref(), &track) {
+                    if album_differs(self.current.as_ref(), &track) {
+                        self.cover = album_art.get_album_art(&track).ok();
+                    }
+                    self.anchor = None;
+                    self.current = Some(track);
+                }
+                // Both notifications (currentTime) and the poll (position +
+                // duration) carry a position; (re)anchor whenever one is present
+                // so progress survives a track switch. Without a duration the bar
+                // is open-ended (elapsed only) until the next poll bounds it.
+                if let Some(pos) = position {
+                    self.anchor = Some(progress_anchor(pos, duration, unix_now()));
+                }
+            }
+        }
+    }
+
+    /// Mirrors the tracked state into Discord. When disabled, presence is cleared
+    /// but the state is retained so re-enabling resumes the current track.
+    /// `force` bypasses the rate-limit throttle for an instant menu-toggle response.
+    fn publish(&self, discord: &mut Discord, enabled: bool, force: bool) {
+        let result = match (enabled, self.last_state, &self.current) {
+            (true, State::Playing, Some(track)) => {
+                discord.update(track, self.cover.clone(), self.anchor, force)
+            }
+            _ => discord.clear(force),
+        };
+        if let Err(e) = result {
+            error!("Discord presence error: {e:?}");
+        }
     }
 }
 
