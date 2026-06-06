@@ -6,7 +6,7 @@
 
 ## Building
 
-I'm using `cargo bundle` to package the app here
+I'm using `cargo bundle --release` to package the app.
 
 ## Contributing
 
