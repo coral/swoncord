@@ -52,7 +52,7 @@ serde = "1.0.228"
 osakit = { version = "0.3.1", features = ["full"]}
 
 [dev-dependencies]
-serde_json = "1"
+serde_json = "1.0.150"
 
 [profile.release]
 opt-level = 3        # maximum runtime optimization
