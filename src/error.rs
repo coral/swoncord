@@ -6,8 +6,6 @@ pub enum Error {
     NoData,
     #[error("discord IPC error")]
     Ipc(#[from] discord_rich_presence::error::Error),
-    // Boxed: `ApiEndpointError` is large, and boxing keeps `Result<_, Error>`
-    // small (avoids clippy::result_large_err).
     #[error("musicbrainz error")]
     MusicBrainz(#[source] Box<musicbrainz_rs::ApiEndpointError>),
 }

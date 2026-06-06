@@ -9,13 +9,6 @@ use regex::Regex;
 use reqwest::blocking::Client as HttpClient;
 use std::time::Duration;
 
-/// User-agent reported to the MusicBrainz API (their guidelines require one).
-const MUSICBRAINZ_USER_AGENT: &str = "SwinsianRichPresence/1.0.0 ( https://jonasbengtson.se )";
-
-/// Network timeout for CoverArtArchive requests, so a slow upstream can't stall
-/// the presence thread.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Strips trailing parenthetical/bracketed qualifiers from an album name, e.g.
 /// "Album (Deluxe Edition)" or "Album [Remaster] (Bonus)" -> "Album". Used as a
 /// last-ditch broadening of the MusicBrainz search.
@@ -31,13 +24,13 @@ pub struct AlbumArtRequester {
 
 impl AlbumArtRequester {
     pub fn new() -> Self {
-        let client = MusicBrainzClient::new(MUSICBRAINZ_USER_AGENT);
+        let client = MusicBrainzClient::new("SwinsianRichPresence/1.0.0 ( https://jonasbengtson.se )");
 
         // MusicBrainzClient manages its own (ureq-based) HTTP client internally;
         // we only control the CoverArtArchive request, so we give that one a
         // timeout to keep a slow upstream from stalling the consumer.
         let http = HttpClient::builder()
-            .timeout(HTTP_TIMEOUT)
+            .timeout(Duration::from_secs(10))
             .build()
             .expect("HTTP client builds from a static config");
 

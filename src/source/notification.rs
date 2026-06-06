@@ -10,10 +10,6 @@ use log::error;
 use objc2_foundation::{NSDistributedNotificationCenter, NSNotification, NSString};
 use std::ptr::NonNull;
 
-/// Env var that, when set, logs every Swinsian notification's name and full
-/// `userInfo` — a developer aid for discovering which keys/values Swinsian sends.
-const DEBUG_ENV: &str = "SWONCORD_DEBUG_NOTIFICATIONS";
-
 /// The Swinsian notifications this source registers observers for.
 const SWINSIAN_NOTIFICATIONS: [&str; 3] = [
     SWINSIAN_TRACK_PLAYING,
@@ -28,9 +24,9 @@ pub struct NotificationSource;
 impl TrackSource for NotificationSource {
     fn start(self, tx: TrackTx) {
         let center = NSDistributedNotificationCenter::defaultCenter();
-        let dump = std::env::var_os(DEBUG_ENV).is_some();
+        let dump = std::env::var_os("SWONCORD_DEBUG_NOTIFICATIONS").is_some();
         if dump {
-            eprintln!("[swoncord] notification dump enabled ({DEBUG_ENV}) — printing full userInfo");
+            eprintln!("dumping nsnotification data");
         }
 
         let block = RcBlock::new(move |notification: NonNull<NSNotification>| {
@@ -58,9 +54,6 @@ impl TrackSource for NotificationSource {
 
         for name in SWINSIAN_NOTIFICATIONS {
             let ns_name = NSString::from_str(name);
-            // Safe: nil object/queue is valid, and the block matches the
-            // expected `Fn(NonNull<NSNotification>)` signature. The center
-            // copies the block and retains the observer token internally.
             unsafe {
                 let _observer = center.addObserverForName_object_queue_usingBlock(
                     Some(&ns_name),
