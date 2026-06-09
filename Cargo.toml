@@ -39,6 +39,12 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSView",
     "NSButton",
 ] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2",
+    "objc2-foundation",
+    "SMAppService",
+] }
 block2 = "0.6.2"
 crossbeam = "0.8.4"
 discord-rich-presence = "1.1.0"

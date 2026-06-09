@@ -14,6 +14,7 @@ use objc2_app_kit::{
 };
 use crossbeam::channel::Sender;
 use objc2_foundation::{NSBundle, NSSize, NSString};
+use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -71,6 +72,62 @@ impl ToggleTarget {
     }
 }
 
+/// Instance variables for [`AutostartTarget`].
+struct AutostartIvars {
+    /// The menu item whose checkmark mirrors the login-item registration.
+    item: Retained<NSMenuItem>,
+}
+
+define_class!(
+    // Objective-C target object for the "Autostart" menu item's action.
+    #[unsafe(super = NSObject)]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = AutostartIvars]
+    struct AutostartTarget;
+
+    impl AutostartTarget {
+        #[unsafe(method(toggleAutostart:))]
+        fn toggle_autostart(&self, _sender: Option<&AnyObject>) {
+            // Register/unregister the main app as a login item. macOS 13+ via
+            // SMAppService; only meaningful when running from the .app bundle.
+            let service = unsafe { SMAppService::mainAppService() };
+            let result = if autostart_enabled(&service) {
+                unsafe { service.unregisterAndReturnError() }
+            } else {
+                unsafe { service.registerAndReturnError() }
+            };
+            if let Err(err) = result {
+                log::warn!("autostart toggle failed: {err:?}");
+            }
+            // Re-read the authoritative status rather than assuming the toggle
+            // took effect — registration can land in RequiresApproval, etc.
+            set_check(&self.ivars().item, autostart_enabled(&service));
+        }
+    }
+);
+
+impl AutostartTarget {
+    fn new(mtm: MainThreadMarker, item: Retained<NSMenuItem>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AutostartIvars { item });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// Whether the main app is currently registered as a login item.
+fn autostart_enabled(service: &SMAppService) -> bool {
+    let status = unsafe { service.status() };
+    status == SMAppServiceStatus::Enabled
+}
+
+/// Sets a menu item's checkmark from a boolean.
+fn set_check(item: &NSMenuItem, on: bool) {
+    item.setState(if on {
+        NSControlStateValueOn
+    } else {
+        NSControlStateValueOff
+    });
+}
+
 /// Owns the menu-bar status item and drives the `NSApplication` run loop.
 pub struct Wrapper {
     mtm: MainThreadMarker,
@@ -82,6 +139,8 @@ pub struct Wrapper {
     status_item: Option<Retained<NSStatusItem>>,
     /// Held because `NSMenuItem::setTarget` is a weak reference.
     toggle_target: Option<Retained<ToggleTarget>>,
+    /// Held because `NSMenuItem::setTarget` is a weak reference.
+    autostart_target: Option<Retained<AutostartTarget>>,
 }
 
 impl Wrapper {
@@ -98,12 +157,14 @@ impl Wrapper {
             wake,
             status_item: None,
             toggle_target: None,
+            autostart_target: None,
         })
     }
 
     /// Populates the menu. Call before [`Wrapper::run`].
     pub fn configure(&mut self) {
         self.add_enabled_item();
+        self.add_autostart_item();
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
         self.add_quit_item("Quit");
     }
@@ -135,6 +196,32 @@ impl Wrapper {
         }
         self.menu.addItem(&item);
         self.toggle_target = Some(target);
+    }
+
+    /// Adds the "Autostart" checkmark item, wired to register/unregister the
+    /// app as a macOS login item via `SMAppService`.
+    fn add_autostart_item(&mut self) {
+        let title = NSString::from_str("Autostart");
+        let no_key = NSString::from_str("");
+        // Safe: `toggleAutostart:` is implemented on the target we set below.
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                self.mtm.alloc(),
+                &title,
+                Some(sel!(toggleAutostart:)),
+                &no_key,
+            )
+        };
+        let service = unsafe { SMAppService::mainAppService() };
+        set_check(&item, autostart_enabled(&service));
+
+        let target = AutostartTarget::new(self.mtm, item.clone());
+        // Safe: the target outlives the item (stored in `self.autostart_target`).
+        unsafe {
+            item.setTarget(Some(&target));
+        }
+        self.menu.addItem(&item);
+        self.autostart_target = Some(target);
     }
 
     fn add_quit_item(&self, label: &str) {
