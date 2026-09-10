@@ -1,8 +1,8 @@
 //! Pull source: poll Swinsian via JXA (osakit) to supplement notifications.
 //!
-//! Notifications only fire while both Swinsian and swoncord are running, carry no
-//! playback position, and never signal a quit. This source polls once at startup
-//! and every [`POLL_INTERVAL_SECS`] to close those gaps: it picks up a track
+//! Notifications only fire while both Swinsian and swoncord are running and never
+//! signal a quit. This source polls once at startup and every
+//! [`POLL_INTERVAL_SECS`] to close those gaps: it picks up a track
 //! already playing at launch, reports `position`/`duration` to drive the progress
 //! bar, and reports "stopped" when Swinsian isn't running (a backstop to the
 //! [`super::workspace`] quit observer).
@@ -11,7 +11,7 @@
 //! scheduled on the main run loop rather than a background thread.
 
 use super::{TrackSource, TrackTx};
-use crate::track::{State, TrackInfo};
+use crate::track::{State, TrackInfo, TrackUpdate, unix_now};
 use block2::RcBlock;
 use log::error;
 use objc2_foundation::NSTimer;
@@ -45,17 +45,18 @@ declare_script! {
         }
 
         const track = swinsian.currentTrack();
-
+        const metadata = {
+            format: track.kind(),
+            song: track.name(),
+            artist: track.artist(),
+            album: track.album(),
+            dur: track.duration()
+        };
+        metadata.pos = swinsian.playerPosition();
         return {
             state: state,
-            track: {
-                format: track.kind(),
-                song: track.name(),
-                artist: track.artist(),
-                album: track.album(),
-                pos: swinsian.playerPosition(),
-                dur: track.duration()
-            }
+            track: metadata,
+            observed_at: Math.floor(Date.now() / 1000)
         };
     }
 "#)]
@@ -94,6 +95,9 @@ pub struct PlayerState {
     pub state: PlaybackState,
     #[serde(default)]
     pub track: Option<Track>,
+    // OSAKit may represent JavaScript numbers as either integers or doubles.
+    #[serde(default)]
+    pub observed_at: Option<f64>,
 }
 
 impl From<PlaybackState> for State {
@@ -108,9 +112,9 @@ impl From<PlaybackState> for State {
 }
 
 impl PlayerState {
-    /// Maps a poll result into the channel's `(State, TrackInfo)` shape. A
-    /// missing track (stopped / not running) yields a default `TrackInfo`.
-    fn into_update(self) -> (State, TrackInfo) {
+    /// Preserve the script's position-sampling time across script return and
+    /// worker delays. Stopped observations have no position and use receipt time.
+    fn into_update(self, received_at: i64) -> TrackUpdate {
         let state = State::from(self.state);
         let track = self
             .track
@@ -123,7 +127,14 @@ impl PlayerState {
                 duration: Some(t.dur),
             })
             .unwrap_or_default();
-        (state, track)
+        TrackUpdate {
+            state,
+            track,
+            observed_at: self
+                .observed_at
+                .map(|time| time as i64)
+                .unwrap_or(received_at),
+        }
     }
 }
 
@@ -165,7 +176,7 @@ impl TrackSource for AppleScriptSource {
 fn poll_once(script: &SwinsianState, tx: &TrackTx) {
     match script.get() {
         Ok(player_state) => {
-            if let Err(e) = tx.send(player_state.into_update()) {
+            if let Err(e) = tx.send(player_state.into_update(unix_now())) {
                 error!("failed to forward poll update: {e}");
             }
         }
@@ -181,14 +192,20 @@ mod tests {
     fn converts_playing_track_from_jxa_json() {
         let json = r#"{
             "state": "playing",
+            "observed_at": 1000.0,
             "track": {
                 "format": "AAC", "song": "Song", "artist": "Artist",
                 "album": "Album", "pos": 30.0, "dur": 200.0
             }
         }"#;
         let ps: PlayerState = serde_json::from_str(json).unwrap();
-        let (state, track) = ps.into_update();
+        let TrackUpdate {
+            state,
+            track,
+            observed_at,
+        } = ps.into_update(1010);
 
+        assert_eq!(observed_at, 1000); // script return / processing delay is excluded
         assert_eq!(state, State::Playing);
         assert_eq!(track.title, "Song");
         assert_eq!(track.artist, "Artist");
@@ -201,8 +218,13 @@ mod tests {
     #[test]
     fn converts_stopped_to_default_track() {
         let ps: PlayerState = serde_json::from_str(r#"{"state":"stopped"}"#).unwrap();
-        let (state, track) = ps.into_update();
+        let TrackUpdate {
+            state,
+            track,
+            observed_at,
+        } = ps.into_update(1000);
 
+        assert_eq!(observed_at, 1000);
         assert_eq!(state, State::Stopped);
         assert_eq!(track, TrackInfo::default());
     }

@@ -4,15 +4,16 @@
 //! the main thread (enforced by [`MainThreadMarker`]) so macOS can dispatch
 //! events to the app delegate.
 
-use crate::error::Error;
+use crossbeam::channel::Sender;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSControlStateValueOff, NSControlStateValueOn,
     NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use crossbeam::channel::Sender;
 use objc2_foundation::{NSBundle, NSSize, NSString};
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use std::sync::Arc;
@@ -144,12 +145,8 @@ pub struct Wrapper {
 }
 
 impl Wrapper {
-    pub fn new(
-        mtm: MainThreadMarker,
-        enabled: Arc<AtomicBool>,
-        wake: Sender<()>,
-    ) -> Result<Self, Error> {
-        Ok(Self {
+    pub fn new(mtm: MainThreadMarker, enabled: Arc<AtomicBool>, wake: Sender<()>) -> Self {
+        Self {
             mtm,
             app: NSApplication::sharedApplication(mtm),
             menu: NSMenu::new(mtm),
@@ -158,7 +155,7 @@ impl Wrapper {
             status_item: None,
             toggle_target: None,
             autostart_target: None,
-        })
+        }
     }
 
     /// Populates the menu. Call before [`Wrapper::run`].
@@ -188,8 +185,12 @@ impl Wrapper {
             NSControlStateValueOff
         });
 
-        let target =
-            ToggleTarget::new(self.mtm, self.enabled.clone(), self.wake.clone(), item.clone());
+        let target = ToggleTarget::new(
+            self.mtm,
+            self.enabled.clone(),
+            self.wake.clone(),
+            item.clone(),
+        );
         // Safe: the target outlives the item (stored in `self.toggle_target`).
         unsafe {
             item.setTarget(Some(&target));

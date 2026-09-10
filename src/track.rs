@@ -1,5 +1,22 @@
 //! Domain types shared between track sources and the Discord consumer.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A source observation, timestamped before it enters a worker's mailbox.
+#[derive(Debug, Clone)]
+pub struct TrackUpdate {
+    pub state: State,
+    pub track: TrackInfo,
+    pub observed_at: i64,
+}
+
+pub fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// Distributed-notification name Swinsian posts when playback starts.
 pub const SWINSIAN_TRACK_PLAYING: &str = "com.swinsian.Swinsian-Track-Playing";
 /// Distributed-notification name Swinsian posts when playback stops.
@@ -9,9 +26,8 @@ pub const SWINSIAN_TRACK_PAUSED: &str = "com.swinsian.Swinsian-Track-Paused";
 
 /// Metadata for the currently-playing track.
 ///
-/// `position`/`duration` are populated only by sources that can report playback
-/// progress (the AppleScript pull source); the notification source leaves them
-/// `None`. They drive the Discord progress bar when present.
+/// `position`/`duration` are populated when available from either notifications
+/// or the AppleScript poll. They drive the Discord progress bar when present.
 #[derive(Debug, Default, PartialEq, Clone)]
 pub struct TrackInfo {
     pub artist: String,

@@ -7,7 +7,7 @@
 //! this misses (e.g. force-kill).
 
 use super::{TrackSource, TrackTx};
-use crate::track::{State, TrackInfo};
+use crate::track::{State, TrackInfo, TrackUpdate, unix_now};
 use block2::RcBlock;
 use log::error;
 use objc2_app_kit::{
@@ -35,7 +35,11 @@ impl TrackSource for WorkspaceWatcher {
             if !terminated_app_is_swinsian(notification) {
                 return;
             }
-            if let Err(e) = tx.send((State::Stopped, TrackInfo::default())) {
+            if let Err(e) = tx.send(TrackUpdate {
+                state: State::Stopped,
+                track: TrackInfo::default(),
+                observed_at: unix_now(),
+            }) {
                 error!("failed to forward quit update: {e}");
             }
         });

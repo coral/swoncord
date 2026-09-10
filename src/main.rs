@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 mod discord;
 mod error;
+mod latest;
 mod macos;
 mod objc_util;
 mod source;
@@ -23,16 +24,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting swoncord");
 
     let mtm = MainThreadMarker::new().expect("main must run on the main thread");
-    let (tx, rx) = bounded(100);
+    let (tx, rx) = latest::channel();
 
     let enabled = Arc::new(AtomicBool::new(true));
     let (wake_tx, wake_rx) = bounded::<()>(1);
 
     // background thread for discord
-    let _discord = discord::Discord::new(rx, enabled.clone(), wake_rx)?;
+    let _discord = discord::start(rx, enabled.clone(), wake_rx)?;
 
     // osx menu bar on main thread
-    let mut app = macos::Wrapper::new(mtm, enabled, wake_tx)?;
+    let mut app = macos::Wrapper::new(mtm, enabled, wake_tx);
     app.configure();
 
     // shared communication

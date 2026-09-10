@@ -1,366 +1,227 @@
-//! Discord rich-presence client and the consumer that drives it.
+//! Independent workers for Discord presence and optional album artwork.
 
 mod albumart;
+mod playback;
+mod transport;
 
-use crate::error::Error;
-use crate::track::{State, TrackInfo};
-use albumart::AlbumArtRequester;
-use crossbeam::channel::Receiver;
-use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
-use log::error;
+use crate::latest;
+use crate::track::TrackUpdate;
+use albumart::{AlbumArtRequester, ArtworkLookup};
+use crossbeam::channel::{self, Receiver};
+use playback::{ArtworkRequest, ArtworkResult, Playback};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::thread::{self, JoinHandle};
+use transport::{Clock, Connection, DiscordTransport, SystemClock, Transport};
 
-/// Discord application ID this presence runs under.
-const DISCORD_APP_ID: &str = "1076384656850698240";
-
-/// Minimum time between Discord activity writes, to stay under its rate limit.
-const UPDATE_THROTTLE: Duration = Duration::from_secs(4);
-
-/// How long the consumer waits for an event before re-evaluating state.
-const RECV_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Max length of a Discord rich-presence text field (state/details/large_text).
-const FIELD_MAX: usize = 128;
-
-enum PresenceState {
-    Active,
-    Cleared,
+/// Starts workers without connecting to Discord or making HTTP requests on the
+/// main thread. Discord may be absent when Swoncord starts (e.g. at login).
+pub fn start(
+    rx: latest::Receiver<TrackUpdate>,
+    enabled: Arc<AtomicBool>,
+    wake: Receiver<()>,
+) -> std::io::Result<JoinHandle<()>> {
+    let (requests, pending) = latest::channel();
+    let (results, artwork) = latest::channel();
+    thread::Builder::new()
+        .name("swoncord-artwork".into())
+        .spawn(move || {
+            run_artwork(AlbumArtRequester::new(), pending, results);
+        })?;
+    thread::Builder::new()
+        .name("swoncord-discord".into())
+        .spawn(move || {
+            let connection = Connection::new(DiscordTransport::new(), SystemClock);
+            pump(rx, enabled, wake, requests, artwork, connection);
+        })
 }
 
-pub struct Discord {
-    client: DiscordIpcClient,
-    last_updated: Instant,
-    state: PresenceState,
-}
-
-impl Discord {
-    /// Connects to Discord and spawns the background consumer that reads track
-    /// updates from `rx`. Returns the shared client so the caller keeps it alive.
-    pub fn new(
-        rx: Receiver<(State, TrackInfo)>,
-        enabled: Arc<AtomicBool>,
-        wake: Receiver<()>,
-    ) -> Result<Arc<Mutex<Self>>, Error> {
-        let mut client = DiscordIpcClient::new(DISCORD_APP_ID);
-        client.connect()?;
-
-        let shared = Arc::new(Mutex::new(Self {
-            client,
-            last_updated: Instant::now(),
-            state: PresenceState::Cleared,
-        }));
-
-        let consumer = shared.clone();
-        std::thread::spawn(move || Self::pump(rx, consumer, enabled, wake));
-
-        Ok(shared)
-    }
-
-    /// Background loop: waits for a source update, a menu toggle (`wake`), or a
-    /// timeout, then reflects the current [`Playback`] into Discord.
-    fn pump(
-        rx: Receiver<(State, TrackInfo)>,
-        shared: Arc<Mutex<Self>>,
-        enabled: Arc<AtomicBool>,
-        wake: Receiver<()>,
-    ) {
-        let album_art = AlbumArtRequester::new();
-        let mut playback = Playback::default();
-
-        loop {
-            // A menu toggle forces an immediate (un-throttled) re-dispatch;
-            // source updates and the timeout use the normal cadence.
-            let force = crossbeam::channel::select! {
-                recv(rx) -> msg => {
-                    if let Ok((state, track)) = msg {
-                        playback.apply(state, track, &album_art);
-                    }
-                    false
-                }
-                recv(wake) -> _ => true,
-                default(RECV_TIMEOUT) => false,
-            };
-
-            let mut discord = shared.lock().expect("discord mutex poisoned");
-            playback.publish(&mut discord, enabled.load(Ordering::Relaxed), force);
-        }
-    }
-
-    fn update(
-        &mut self,
-        t: &TrackInfo,
-        cover: Option<String>,
-        anchor: Option<Anchor>,
-        force: bool,
-    ) -> Result<(), Error> {
-        // Discord rejects the whole activity if any text field is outside 2..=128
-        // chars, so short fields (e.g. a one-letter title "J") are padded and
-        // empty ones omitted.
-        let state = presence_field(&t.artist);
-        let details = presence_field(&t.title);
-        let large_text = presence_field(&t.album);
-
-        let uri = cover.unwrap_or_else(|| "sw2".to_string());
-
-        let mut assets = activity::Assets::new()
-            .large_image(&uri)
-            .small_text("Listening");
-        if let Some(text) = &large_text {
-            assets = assets.large_text(text);
-        }
-
-        let mut payload = activity::Activity::new()
-            .activity_type(activity::ActivityType::Listening)
-            .assets(assets);
-        if let Some(state) = &state {
-            payload = payload.state(state);
-        }
-        if let Some(details) = &details {
-            payload = payload.details(details);
-        }
-
-        // Progress bar: Discord ticks from `start` on its own, so we set absolute
-        // timestamps (recomputed from a fresh position by the pump). With an
-        // `end` it renders a bounded bar; without one, an open-ended elapsed
-        // counter (the case right after a track switch, before the next poll).
-        if let Some(anchor) = anchor {
-            let mut timestamps = activity::Timestamps::new().start(anchor.start);
-            if let Some(end) = anchor.end {
-                timestamps = timestamps.end(end);
-            }
-            payload = payload.timestamps(timestamps);
-        }
-
-        if force || Instant::now().duration_since(self.last_updated) >= UPDATE_THROTTLE {
-            match self.client.set_activity(payload) {
-                Ok(_) => self.last_updated = Instant::now(),
-                Err(e) => {
-                    error!("Error setting Discord status: {e:?}");
-                    if let Err(e) = self.client.reconnect() {
-                        error!("Discord reconnect failed: {e:?}");
-                    }
-                }
-            }
-        }
-
-        self.state = PresenceState::Active;
-        Ok(())
-    }
-
-    fn clear(&mut self, force: bool) -> Result<(), Error> {
-        let throttled =
-            Instant::now().duration_since(self.last_updated) < UPDATE_THROTTLE;
-        if matches!(self.state, PresenceState::Active) && (force || !throttled) {
-            if self.client.clear_activity().is_err() {
-                if let Err(e) = self.client.reconnect() {
-                    error!("Discord reconnect failed: {e:?}");
-                }
-            } else {
-                self.last_updated = Instant::now();
-                self.state = PresenceState::Cleared;
-            }
-        }
-        Ok(())
-    }
-}
-
-/// The playback state the pump tracks across events, and how it's mirrored into
-/// Discord.
-///
-/// Updates are deduplicated by track identity, so a position-less notification
-/// for the current track doesn't wipe the `position` learned from a poll. The
-/// `anchor` is (re)computed only when a message carries a position, and reset
-/// when the track changes.
-#[derive(Default)]
-struct Playback {
-    current: Option<TrackInfo>,
-    last_state: State,
-    cover: Option<String>,
-    anchor: Option<Anchor>,
-}
-
-impl Playback {
-    /// Folds a source update into the tracked state.
-    fn apply(&mut self, state: State, track: TrackInfo, album_art: &AlbumArtRequester) {
-        self.last_state = state;
-        match state {
-            State::Stopped | State::Unknown => {
-                self.current = None;
-                self.anchor = None;
-            }
-            State::Playing | State::Paused => {
-                let (position, duration) = (track.position, track.duration);
-                if !same_track(self.current.as_ref(), &track) {
-                    if album_differs(self.current.as_ref(), &track) {
-                        self.cover = album_art.get_album_art(&track).ok();
-                    }
-                    self.anchor = None;
-                    self.current = Some(track);
-                }
-                // Both notifications (currentTime) and the poll (position +
-                // duration) carry a position; (re)anchor whenever one is present
-                // so progress survives a track switch. Without a duration the bar
-                // is open-ended (elapsed only) until the next poll bounds it.
-                if let Some(pos) = position {
-                    self.anchor = Some(progress_anchor(pos, duration, unix_now()));
-                }
-            }
-        }
-    }
-
-    /// Mirrors the tracked state into Discord. When disabled, presence is cleared
-    /// but the state is retained so re-enabling resumes the current track.
-    /// `force` bypasses the rate-limit throttle for an instant menu-toggle response.
-    fn publish(&self, discord: &mut Discord, enabled: bool, force: bool) {
-        let result = match (enabled, self.last_state, &self.current) {
-            (true, State::Playing, Some(track)) => {
-                discord.update(track, self.cover.clone(), self.anchor, force)
-            }
-            _ => discord.clear(force),
+fn run_artwork(
+    mut lookup: impl ArtworkLookup,
+    requests: latest::Receiver<ArtworkRequest>,
+    results: latest::Sender<ArtworkResult>,
+) {
+    while requests.ready().recv().is_ok() {
+        let Some(request) = requests.take() else {
+            continue;
         };
-        if let Err(e) = result {
-            error!("Discord presence error: {e:?}");
+        let result = ArtworkResult {
+            generation: request.generation,
+            cover: lookup.lookup(&request.track),
+        };
+        if results.send(result).is_err() {
+            break;
         }
     }
 }
 
-/// Prepares a value for a Discord presence text field, which must be 2–128
-/// characters or the whole activity is rejected. Truncates to the max, pads
-/// values shorter than two chars (e.g. a one-letter title "J"), and returns
-/// `None` for empty values so the field is omitted rather than sent blank.
-fn presence_field(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut field: String = trimmed.chars().take(FIELD_MAX).collect();
-    while field.chars().count() < 2 {
-        field.push(' ');
-    }
-    Some(field)
-}
-
-/// Whether `incoming` is the same track as `current` (ignoring position, so a
-/// poll-vs-notification difference doesn't count as a new track).
-fn same_track(current: Option<&TrackInfo>, incoming: &TrackInfo) -> bool {
-    match current {
-        Some(c) => {
-            c.artist == incoming.artist && c.album == incoming.album && c.title == incoming.title
+fn pump<T: Transport, C: Clock>(
+    rx: latest::Receiver<TrackUpdate>,
+    enabled: Arc<AtomicBool>,
+    mut wake: Receiver<()>,
+    requests: latest::Sender<ArtworkRequest>,
+    artwork: latest::Receiver<ArtworkResult>,
+    mut connection: Connection<T, C>,
+) {
+    let mut playback = Playback::default();
+    let mut was_enabled = enabled.load(Ordering::Relaxed);
+    let mut art_ready = artwork.ready().clone();
+    loop {
+        // Consume the newest observation before accepting an artwork result.
+        // The generation check rejects results for replaced tracks.
+        if let Some(update) = rx.take()
+            && let Some(request) = playback.apply(update)
+        {
+            let _ = requests.send(request);
         }
-        None => false,
-    }
-}
+        if let Some(result) = artwork.take() {
+            playback.accept_artwork(result);
+        }
 
-/// Whether `incoming`'s album differs from `current`'s (i.e. cover art must be
-/// refetched). A `None` current counts as a change.
-fn album_differs(current: Option<&TrackInfo>, incoming: &TrackInfo) -> bool {
-    current.is_none_or(|c| c.album != incoming.album)
-}
+        let is_enabled = enabled.load(Ordering::Relaxed);
+        connection.publish(playback.presence(is_enabled), is_enabled != was_enabled);
+        was_enabled = is_enabled;
 
-/// Absolute timestamps for the Discord progress bar. `end` is unknown until a
-/// poll reports the track duration, so it's optional (open-ended elapsed bar).
-#[derive(Clone, Copy)]
-struct Anchor {
-    start: i64,
-    end: Option<i64>,
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-/// Anchor for the Discord progress bar, derived from the current playback `pos`
-/// and (when known) track `dur`, both in seconds.
-fn progress_anchor(pos: f64, dur: Option<f64>, now: i64) -> Anchor {
-    let start = now - pos as i64;
-    Anchor {
-        start,
-        end: dur.map(|d| start + d as i64),
+        channel::select! {
+            recv(rx.ready()) -> event => if event.is_err() { break; },
+            recv(wake) -> event => if event.is_err() { wake = channel::never(); },
+            recv(art_ready) -> event => if event.is_err() { art_ready = channel::never(); },
+            default(connection.wait_timeout()) => {},
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::track::{State, TrackInfo};
+    use playback::Presence;
+    use std::time::Duration;
 
-    fn track(album: &str) -> TrackInfo {
-        TrackInfo {
-            album: album.to_string(),
-            ..Default::default()
+    struct BlockedLookup {
+        started: channel::Sender<String>,
+        release: Receiver<()>,
+    }
+    impl ArtworkLookup for BlockedLookup {
+        fn lookup(&mut self, track: &TrackInfo) -> Option<String> {
+            self.started.send(track.title.clone()).unwrap();
+            self.release.recv().unwrap();
+            Some(format!("art:{}", track.title))
         }
     }
 
-    fn full_track(artist: &str, album: &str, title: &str) -> TrackInfo {
-        TrackInfo {
-            artist: artist.to_string(),
-            album: album.to_string(),
-            title: title.to_string(),
-            ..Default::default()
+    struct RecordingTransport(channel::Sender<Option<String>>);
+    impl Transport for RecordingTransport {
+        type Error = ();
+        fn connect(&mut self) -> Result<(), Self::Error> {
+            Ok(())
         }
+        fn update(&mut self, presence: &Presence<'_>) -> Result<(), Self::Error> {
+            self.0.send(Some(presence.track.title.clone())).unwrap();
+            Ok(())
+        }
+        fn clear(&mut self) -> Result<(), Self::Error> {
+            self.0.send(None).unwrap();
+            Ok(())
+        }
+        fn disconnect(&mut self) {}
     }
 
     #[test]
-    fn album_differs_on_first_track() {
-        assert!(album_differs(None, &track("A")));
+    fn blocked_artwork_does_not_delay_initial_presence_or_disable() {
+        let (tx, rx) = latest::channel();
+        let (requests, pending) = latest::channel();
+        let (results, artwork) = latest::channel();
+        let (started_tx, started) = channel::bounded(1);
+        let (release, release_rx) = channel::bounded(1);
+        let art_thread = thread::spawn(move || {
+            run_artwork(
+                BlockedLookup {
+                    started: started_tx,
+                    release: release_rx,
+                },
+                pending,
+                results,
+            )
+        });
+        let enabled = Arc::new(AtomicBool::new(true));
+        let (wake_tx, wake) = channel::bounded(1);
+        let (writes_tx, writes) = channel::unbounded();
+        tx.send(TrackUpdate {
+            state: State::Playing,
+            track: TrackInfo {
+                title: "Song".into(),
+                ..Default::default()
+            },
+            observed_at: 1000,
+        })
+        .unwrap();
+        let worker_enabled = enabled.clone();
+        let worker = thread::spawn(move || {
+            pump(
+                rx,
+                worker_enabled,
+                wake,
+                requests,
+                artwork,
+                Connection::new(RecordingTransport(writes_tx), SystemClock),
+            )
+        });
+        assert_eq!(
+            started.recv_timeout(Duration::from_secs(2)).unwrap(),
+            "Song"
+        );
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Some("Song".into())
+        );
+        enabled.store(false, Ordering::Relaxed);
+        wake_tx.send(()).unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(2)).unwrap(), None);
+        // The lookup remains blocked until explicitly released by the test.
+        drop(tx);
+        worker.join().unwrap();
+        release.send(()).unwrap();
+        art_thread.join().unwrap();
     }
 
     #[test]
-    fn album_differs_when_album_changes() {
-        assert!(album_differs(Some(&track("A")), &track("B")));
-    }
-
-    #[test]
-    fn album_same_when_album_unchanged() {
-        assert!(!album_differs(Some(&track("A")), &track("A")));
-    }
-
-    #[test]
-    fn same_track_matches_identity_ignoring_position() {
-        let mut a = full_track("Artist", "Album", "Song");
-        let mut b = full_track("Artist", "Album", "Song");
-        a.position = None;
-        b.position = Some(42.0); // a poll-vs-notification difference
-        assert!(same_track(Some(&a), &b));
-    }
-
-    #[test]
-    fn same_track_distinguishes_different_song() {
-        let a = full_track("Artist", "Album", "Song One");
-        let b = full_track("Artist", "Album", "Song Two");
-        assert!(!same_track(Some(&a), &b));
-        assert!(!same_track(None, &b));
-    }
-
-    #[test]
-    fn presence_field_pads_short_drops_empty_keeps_normal() {
-        assert_eq!(presence_field("J").as_deref(), Some("J "));
-        assert_eq!(presence_field(""), None);
-        assert_eq!(presence_field("   "), None);
-        assert_eq!(presence_field("Normal Title").as_deref(), Some("Normal Title"));
-    }
-
-    #[test]
-    fn presence_field_truncates_to_max() {
-        let long = "x".repeat(FIELD_MAX + 50);
-        assert_eq!(presence_field(&long).unwrap().chars().count(), FIELD_MAX);
-    }
-
-    #[test]
-    fn progress_anchor_with_duration_bounds_end() {
-        let a = progress_anchor(30.0, Some(200.0), 1000);
-        assert_eq!(a.start, 970);
-        assert_eq!(a.end, Some(1170));
-    }
-
-    #[test]
-    fn progress_anchor_without_duration_is_open_ended() {
-        let a = progress_anchor(30.0, None, 1000);
-        assert_eq!(a.start, 970);
-        assert_eq!(a.end, None);
+    fn artwork_worker_skips_superseded_pending_requests() {
+        let (requests, pending) = latest::channel();
+        let (results, artwork) = latest::channel();
+        let (started_tx, started) = channel::bounded(1);
+        let (release, release_rx) = channel::bounded(1);
+        let worker = thread::spawn(move || {
+            run_artwork(
+                BlockedLookup {
+                    started: started_tx,
+                    release: release_rx,
+                },
+                pending,
+                results,
+            )
+        });
+        let request = |generation, title: &str| ArtworkRequest {
+            generation,
+            track: TrackInfo {
+                title: title.into(),
+                ..Default::default()
+            },
+        };
+        requests.send(request(1, "A")).unwrap();
+        assert_eq!(started.recv_timeout(Duration::from_secs(2)).unwrap(), "A");
+        requests.send(request(2, "B")).unwrap();
+        requests.send(request(3, "C")).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(started.recv_timeout(Duration::from_secs(2)).unwrap(), "C");
+        artwork
+            .ready()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        assert_eq!(artwork.take().unwrap().generation, 1);
+        drop(requests);
+        release.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(artwork.take().unwrap().generation, 3);
     }
 }

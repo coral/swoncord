@@ -1,7 +1,7 @@
-//! Track sources: producers of `(State, TrackInfo)` updates.
+//! Track sources: producers of timestamped playback observations.
 //!
 //! A source observes the music player and pushes updates onto a channel that the
-//! Discord consumer reads. There are two kinds:
+//! Discord consumer reads. There are three kinds:
 //!
 //! - [`notification`]: the live push source, driven by macOS distributed
 //!   notifications from Swinsian.
@@ -11,18 +11,18 @@
 //! - [`workspace`]: watches for Swinsian quitting and reports `Stopped`.
 //!
 //! All run on the **main thread** — observers and the poll timer hook into the
-//! main run loop, and osakit requires the main thread. Only the Discord
-//! consumer is backgrounded. Sources share the channel; the `Sender` is cloned.
+//! main run loop, and osakit requires the main thread. Discord and artwork have
+//! background workers. Sources share a mailbox that retains the newest update.
 
-use crate::track::{State, TrackInfo};
-use crossbeam::channel::Sender;
+use crate::latest::Sender;
+use crate::track::TrackUpdate;
 
 pub mod applescript;
 pub mod notification;
 pub mod workspace;
 
 /// Channel sink a source pushes track updates into.
-pub type TrackTx = Sender<(State, TrackInfo)>;
+pub type TrackTx = Sender<TrackUpdate>;
 
 /// A producer of track updates.
 ///

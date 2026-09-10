@@ -2,6 +2,7 @@
 
 use crate::error::Error;
 use crate::track::TrackInfo;
+use musicbrainz_rs::api_bindium::ureq::{Agent, config::Config};
 use musicbrainz_rs::client::MusicBrainzClient;
 use musicbrainz_rs::entity::release_group::{ReleaseGroup, ReleaseGroupSearchQuery};
 use musicbrainz_rs::prelude::*;
@@ -14,6 +15,16 @@ use std::time::Duration;
 /// last-ditch broadening of the MusicBrainz search.
 const ALBUM_CLEAN_PATTERN: &str = r"\s+[\(\[][^\(\)\[\]]*[\)\]](\s+[\(\[][^\(\)\[\]]*[\)\]])*$";
 
+pub(super) trait ArtworkLookup {
+    fn lookup(&mut self, track: &TrackInfo) -> Option<String>;
+}
+
+impl ArtworkLookup for AlbumArtRequester {
+    fn lookup(&mut self, track: &TrackInfo) -> Option<String> {
+        self.get_album_art(track).ok()
+    }
+}
+
 /// Resolves an album's front cover-art URL from its metadata.
 pub struct AlbumArtRequester {
     client: MusicBrainzClient,
@@ -24,19 +35,25 @@ pub struct AlbumArtRequester {
 
 impl AlbumArtRequester {
     pub fn new() -> Self {
-        let client = MusicBrainzClient::new("SwinsianRichPresence/1.0.0 ( https://jonasbengtson.se )");
+        let mut client = MusicBrainzClient::default();
+        client.api_client.agent = Agent::new_with_config(
+            Config::builder()
+                .user_agent("SwinsianRichPresence/1.0.0 ( https://jonasbengtson.se )")
+                .timeout_global(Some(Duration::from_secs(10)))
+                .build(),
+        );
+        // This is an attempt count, not additional retries. Disable internal
+        // retry sleeps so stale artwork cannot occupy the worker indefinitely.
+        client.api_client.max_retries = 1;
 
-        // MusicBrainzClient manages its own (ureq-based) HTTP client internally;
-        // we only control the CoverArtArchive request, so we give that one a
-        // timeout to keep a slow upstream from stalling the consumer.
+        // Both upstreams have deadlines; only the artwork worker waits on them.
         let http = HttpClient::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .expect("HTTP client builds from a static config");
 
         // Constant pattern verified by the unit tests below.
-        let album_filter =
-            Regex::new(ALBUM_CLEAN_PATTERN).expect("album-clean regex is valid");
+        let album_filter = Regex::new(ALBUM_CLEAN_PATTERN).expect("album-clean regex is valid");
 
         Self {
             client,

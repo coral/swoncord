@@ -4,8 +4,6 @@ use thiserror::Error;
 pub enum Error {
     #[error("no matching release found")]
     NoData,
-    #[error("discord IPC error")]
-    Ipc(#[from] discord_rich_presence::error::Error),
     #[error("musicbrainz error")]
     MusicBrainz(#[source] Box<musicbrainz_rs::ApiEndpointError>),
 }

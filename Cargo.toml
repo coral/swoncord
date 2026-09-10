@@ -71,6 +71,7 @@ strip = true         # drop debug symbols from the final binary
 name = "Swoncord"
 identifier = "com.oblique.media.swoncord"
 icon = ["assets/icon.icns"]
+osx_info_plist_exts = ["Resources/Info.plist"]
 category = "public.app-category.utilities"
 short_description = "Rich presence for Swinsian"
 long_description = """
