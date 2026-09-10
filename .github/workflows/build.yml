@@ -1,0 +1,116 @@
+name: Build and package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  RUSTUP_TOOLCHAIN: stable
+  CARGO_BUILD_TARGET: aarch64-apple-darwin
+
+jobs:
+  macos:
+    name: Build macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check release version and packaging scripts
+        run: |
+          python3 scripts/ci/version.py
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+          bash -n scripts/ci/package-macos.sh
+          bash -n scripts/ci/create-macos-dmg.sh
+          bash -n scripts/ci/sign-macos.sh
+          bash -n scripts/ci/publish-release.sh
+      - name: Install Rust stable
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --target "$CARGO_BUILD_TARGET"
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: aarch64-apple-darwin
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+      - name: Compile release
+        run: cargo build --release --locked
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle --version 0.11.0 --locked
+      - name: Package application for signing
+        run: bash scripts/ci/package-macos.sh
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: swoncord-macos-app
+          path: target/ci/Swoncord.app.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-macos:
+    name: Sign and notarize macOS DMG
+    needs: macos
+    if: github.repository == 'coral/swoncord' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && github.event_name != 'pull_request'
+    runs-on: macos-15
+    environment: release
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: swoncord-macos-app
+          path: unsigned
+      - name: Sign and notarize
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: bash scripts/ci/sign-macos.sh
+      - name: Remove signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/swoncord-signing/signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/swoncord-signing"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: swoncord-aarch64-apple-darwin
+          path: target/ci/dist/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    needs: sign-macos
+    if: github.repository == 'coral/swoncord' && startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: swoncord-aarch64-apple-darwin
+          path: target/ci/dist
+      - name: Publish the signed DMG
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/ci/publish-release.sh
