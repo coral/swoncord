@@ -1,0 +1,11 @@
+# cargo release major/minor/patch --execute pushes the version commit and tag.
+# GitHub Actions builds, signs, notarizes, and publishes the DMG from that tag.
+allow-branch = ["master"]
+publish = false
+pre-release-commit-message = "chore: release {{version}}"
+tag-name = "v{{version}}"
+tag-prefix = ""
+tag-message = "Swoncord {{version}}"
+tag = true
+push = true
+push-remote = "origin"
