@@ -69,6 +69,7 @@ impl Transport for DiscordTransport {
         }
         let mut payload = activity::Activity::new()
             .activity_type(activity::ActivityType::Listening)
+            .status_display_type(activity::StatusDisplayType::State)
             .assets(assets);
         if let Some(state) = &state {
             payload = payload.state(state);
