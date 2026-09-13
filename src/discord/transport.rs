@@ -1,7 +1,8 @@
 //! Discord I/O and retry scheduling, owned exclusively by the presence worker.
 
+use super::ipc::IpcClient;
 use super::playback::Presence;
-use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
+use discord_rich_presence::activity;
 use log::warn;
 use std::fmt::Debug;
 use std::time::{Duration, Instant};
@@ -34,29 +35,26 @@ pub(super) trait Transport {
 }
 
 pub(super) struct DiscordTransport {
-    client: DiscordIpcClient,
+    client: Option<IpcClient>,
 }
 
 impl DiscordTransport {
     pub fn new() -> Self {
-        Self {
-            client: DiscordIpcClient::new(DISCORD_APP_ID),
-        }
+        Self { client: None }
     }
 }
 
 impl Transport for DiscordTransport {
-    type Error = discord_rich_presence::error::Error;
+    type Error = std::io::Error;
 
     fn connect(&mut self) -> Result<(), Self::Error> {
-        // Recreate the client so recovery also works after an initial failure.
-        // The library's reconnect() first closes an existing socket.
-        self.client = DiscordIpcClient::new(DISCORD_APP_ID);
-        self.client.connect()
+        // A fresh socket discards partial frames after a failed exchange.
+        self.client = Some(IpcClient::connect(DISCORD_APP_ID)?);
+        Ok(())
     }
 
     fn disconnect(&mut self) {
-        self.client = DiscordIpcClient::new(DISCORD_APP_ID);
+        self.client = None;
     }
 
     fn update(&mut self, presence: &Presence<'_>) -> Result<(), Self::Error> {
@@ -85,11 +83,17 @@ impl Transport for DiscordTransport {
             }
             payload = payload.timestamps(timestamps);
         }
-        self.client.set_activity(payload)
+        self.client
+            .as_mut()
+            .ok_or(std::io::ErrorKind::NotConnected)?
+            .set_activity(Some(payload))
     }
 
     fn clear(&mut self) -> Result<(), Self::Error> {
-        self.client.clear_activity()
+        self.client
+            .as_mut()
+            .ok_or(std::io::ErrorKind::NotConnected)?
+            .set_activity(None)
     }
 }
 

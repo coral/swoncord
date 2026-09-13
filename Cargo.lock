@@ -1794,6 +1794,7 @@ dependencies = [
  "block2",
  "crossbeam",
  "discord-rich-presence",
+ "libc",
  "log",
  "musicbrainz_rs",
  "objc2",
@@ -1806,6 +1807,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "socket2",
  "thiserror",
 ]
 

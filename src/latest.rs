@@ -53,6 +53,11 @@ impl<T> Receiver<T> {
     pub fn take(&self) -> Option<T> {
         self.pending.lock().expect("mailbox poisoned").take()
     }
+
+    /// Inspect whether work has been superseded without consuming its wakeup.
+    pub fn has_pending(&self) -> bool {
+        self.pending.lock().expect("mailbox poisoned").is_some()
+    }
 }
 
 #[cfg(test)]

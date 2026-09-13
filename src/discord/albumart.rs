@@ -16,13 +16,7 @@ use std::time::Duration;
 const ALBUM_CLEAN_PATTERN: &str = r"\s+[\(\[][^\(\)\[\]]*[\)\]](\s+[\(\[][^\(\)\[\]]*[\)\]])*$";
 
 pub(super) trait ArtworkLookup {
-    fn lookup(&mut self, track: &TrackInfo) -> Option<String>;
-}
-
-impl ArtworkLookup for AlbumArtRequester {
-    fn lookup(&mut self, track: &TrackInfo) -> Option<String> {
-        self.get_album_art(track).ok()
-    }
+    fn lookup(&mut self, track: &TrackInfo, cancelled: &dyn Fn() -> bool) -> Option<String>;
 }
 
 /// Resolves an album's front cover-art URL from its metadata.
@@ -71,16 +65,17 @@ impl AlbumArtRequester {
             release_id
         );
 
-        let has_art = match self.http.head(&cover_art_url).send() {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
-        };
+        self.check_cover(&cover_art_url)?;
+        Ok(cover_art_url)
+    }
 
-        if has_art {
-            Ok(cover_art_url)
-        } else {
-            Err(Error::NoData)
+    fn check_cover(&self, url: &str) -> Result<(), Error> {
+        let response = self.http.head(url).send()?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(Error::NoData);
         }
+        response.error_for_status()?;
+        Ok(())
     }
 
     /// Searches MusicBrainz from most to least specific, returning the first
@@ -103,7 +98,11 @@ impl AlbumArtRequester {
                 .build(),
         ];
 
-        for query in queries {
+        for (index, query) in queries.into_iter().enumerate() {
+            // The synchronous MusicBrainz client has no built-in rate limiter.
+            if index > 0 {
+                std::thread::sleep(Duration::from_secs(1));
+            }
             let results = ReleaseGroup::search(query).execute_with_client(&self.client)?;
             if let Some(first) = results.entities.into_iter().next() {
                 return Ok(first.id);
@@ -121,6 +120,47 @@ impl AlbumArtRequester {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    #[test]
+    fn http_failure_is_distinct_from_missing_art_and_later_requests_recover() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/front-250", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for status in ["503 Service Unavailable", "404 Not Found", "200 OK"] {
+                let (mut stream, _) = server.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = BufReader::new(&mut stream);
+                let mut line = String::new();
+                while request.read_line(&mut line).unwrap() > 0 {
+                    if line == "\r\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+            }
+        });
+        let mut requester = AlbumArtRequester::new();
+        requester.http = HttpClient::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        assert!(
+            matches!(requester.check_cover(&url), Err(Error::Http(error)) if error.status() == Some(reqwest::StatusCode::SERVICE_UNAVAILABLE))
+        );
+        assert!(matches!(requester.check_cover(&url), Err(Error::NoData)));
+        assert!(requester.check_cover(&url).is_ok());
+        worker.join().unwrap();
+    }
 
     #[test]
     fn clean_album_name_strips_trailing_qualifiers() {

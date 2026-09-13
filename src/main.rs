@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 mod discord;
 mod error;
 mod latest;
+mod logging;
 mod macos;
 mod objc_util;
 mod source;
@@ -18,10 +19,15 @@ use source::notification::NotificationSource;
 use source::workspace::WorkspaceWatcher;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    pretty_env_logger::formatted_builder()
-        .parse_filters(&std::env::var("RUST_LOG").unwrap_or_else(|_| "swoncord=info".into()))
-        .init();
-    info!("Starting swoncord");
+    if discord::run_helper()? {
+        return Ok(());
+    }
+    logging::init();
+    info!(
+        "Starting swoncord {} (pid={})",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    );
 
     let mtm = MainThreadMarker::new().expect("main must run on the main thread");
     let (tx, rx) = latest::channel();

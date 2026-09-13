@@ -1,17 +1,22 @@
 //! Independent workers for Discord presence and optional album artwork.
 
 mod albumart;
+mod artwork_process;
+mod ipc;
 mod playback;
 mod transport;
 
 use crate::latest;
 use crate::track::TrackUpdate;
-use albumart::{AlbumArtRequester, ArtworkLookup};
+use albumart::ArtworkLookup;
+use artwork_process::ArtworkProcess;
+pub(crate) use artwork_process::run_helper;
 use crossbeam::channel::{self, Receiver};
 use playback::{ArtworkRequest, ArtworkResult, Playback};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use transport::{Clock, Connection, DiscordTransport, SystemClock, Transport};
 
 /// Starts workers without connecting to Discord or making HTTP requests on the
@@ -26,7 +31,7 @@ pub fn start(
     thread::Builder::new()
         .name("swoncord-artwork".into())
         .spawn(move || {
-            run_artwork(AlbumArtRequester::new(), pending, results);
+            run_artwork(ArtworkProcess, pending, results);
         })?;
     thread::Builder::new()
         .name("swoncord-discord".into())
@@ -41,14 +46,31 @@ fn run_artwork(
     requests: latest::Receiver<ArtworkRequest>,
     results: latest::Sender<ArtworkResult>,
 ) {
+    let mut next_lookup = Instant::now();
     while requests.ready().recv().is_ok() {
+        // Space searches across helpers too, including during rapid skipping.
+        thread::sleep(next_lookup.saturating_duration_since(Instant::now()));
         let Some(request) = requests.take() else {
             continue;
         };
+        log::info!(
+            "Artwork lookup starting: generation={}, artist={:?}, album={:?}",
+            request.generation,
+            request.track.artist,
+            request.track.album
+        );
+        let started = Instant::now();
         let result = ArtworkResult {
             generation: request.generation,
-            cover: lookup.lookup(&request.track),
+            cover: lookup.lookup(&request.track, &|| requests.has_pending()),
         };
+        next_lookup = Instant::now() + Duration::from_secs(1);
+        log::info!(
+            "Artwork lookup finished: generation={}, elapsed={:?}, cover={:?}",
+            result.generation,
+            started.elapsed(),
+            result.cover
+        );
         if results.send(result).is_err() {
             break;
         }
@@ -68,14 +90,17 @@ fn pump<T: Transport, C: Clock>(
     let mut art_ready = artwork.ready().clone();
     loop {
         // Consume the newest observation before accepting an artwork result.
-        // The generation check rejects results for replaced tracks.
+        // The generation check rejects results for replaced albums.
         if let Some(update) = rx.take()
             && let Some(request) = playback.apply(update)
         {
             let _ = requests.send(request);
         }
         if let Some(result) = artwork.take() {
-            playback.accept_artwork(result);
+            playback.accept_artwork(result, Instant::now());
+        }
+        if let Some(request) = playback.retry_artwork(Instant::now()) {
+            let _ = requests.send(request);
         }
 
         let is_enabled = enabled.load(Ordering::Relaxed);
@@ -103,7 +128,7 @@ mod tests {
         release: Receiver<()>,
     }
     impl ArtworkLookup for BlockedLookup {
-        fn lookup(&mut self, track: &TrackInfo) -> Option<String> {
+        fn lookup(&mut self, track: &TrackInfo, _cancelled: &dyn Fn() -> bool) -> Option<String> {
             self.started.send(track.title.clone()).unwrap();
             self.release.recv().unwrap();
             Some(format!("art:{}", track.title))
@@ -183,6 +208,69 @@ mod tests {
         worker.join().unwrap();
         release.send(()).unwrap();
         art_thread.join().unwrap();
+    }
+
+    #[test]
+    fn different_album_cancels_inflight_lookup_and_starts_latest_pending_album() {
+        struct CancellableLookup {
+            started: channel::Sender<String>,
+            cancelled: channel::Sender<String>,
+            release: Receiver<()>,
+        }
+        impl ArtworkLookup for CancellableLookup {
+            fn lookup(
+                &mut self,
+                track: &TrackInfo,
+                cancelled: &dyn Fn() -> bool,
+            ) -> Option<String> {
+                self.started.send(track.album.clone()).unwrap();
+                loop {
+                    if cancelled() {
+                        self.cancelled.send(track.album.clone()).unwrap();
+                        return None;
+                    }
+                    if self.release.recv_timeout(Duration::from_millis(5)).is_ok() {
+                        return Some(format!("art:{}", track.album));
+                    }
+                }
+            }
+        }
+        let (requests, pending) = latest::channel();
+        let (results, artwork) = latest::channel();
+        let (started_tx, started) = channel::unbounded();
+        let (cancelled_tx, cancelled) = channel::unbounded();
+        let (release, release_rx) = channel::bounded(1);
+        let worker = thread::spawn(move || {
+            run_artwork(
+                CancellableLookup {
+                    started: started_tx,
+                    cancelled: cancelled_tx,
+                    release: release_rx,
+                },
+                pending,
+                results,
+            )
+        });
+        let request = |generation, album: &str| ArtworkRequest {
+            generation,
+            track: TrackInfo {
+                album: album.into(),
+                ..Default::default()
+            },
+        };
+        requests.send(request(1, "A")).unwrap();
+        assert_eq!(started.recv_timeout(Duration::from_secs(2)).unwrap(), "A");
+        requests.send(request(2, "B")).unwrap();
+        requests.send(request(3, "C")).unwrap();
+        // A is still blocked: it must cancel without an explicit release.
+        assert_eq!(cancelled.recv_timeout(Duration::from_secs(1)).unwrap(), "A");
+        assert_eq!(started.recv_timeout(Duration::from_secs(2)).unwrap(), "C");
+        release.send(()).unwrap();
+        drop(requests);
+        worker.join().unwrap();
+        let result = artwork.take().unwrap();
+        assert_eq!(result.generation, 3);
+        assert_eq!(result.cover.as_deref(), Some("art:C"));
     }
 
     #[test]
